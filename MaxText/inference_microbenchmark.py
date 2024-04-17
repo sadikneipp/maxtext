@@ -18,6 +18,7 @@
 import datetime
 import jax
 import json
+import queue
 import sys
 
 import numpy as np
@@ -32,21 +33,27 @@ import inference_utils
 
 def prefill_benchmark_loop(config, engine, decode_state, params, tokens, true_length, iters, profile_name=""):
   """ Inner loop for benchmarking prefill step. """
-  all_prefill_seconds = []
+  insert_backlog = queue.Queue(iters)
   max_utils.activate_profiler(config, profile_name)
+  start = datetime.datetime.now()
   for i in range(iters):
-    slot = int(i % (jax.device_count() * config.per_device_batch_size))
-    start = datetime.datetime.now()
     prefill_result = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length)
-    jax.block_until_ready(prefill_result)
-    end = datetime.datetime.now()
-    prefill_seconds = (end - start).total_seconds()
-    all_prefill_seconds.append(prefill_seconds)
+    insert_backlog.put(prefill_result)
+  jax.block_until_ready(prefill_result)
+  end = datetime.datetime.now()
+  prefill_avg_seconds = (end - start).total_seconds() / iters
+
+  for i in range(iters):
+    prefill_result = insert_backlog.get()
+    slot = int(i % (jax.device_count() * config.per_device_batch_size))
     decode_state = engine.insert(prefill_result, decode_state, slot=slot)
-    jax.block_until_ready(decode_state)
     inference_utils.delete_pytree(prefill_result)
+  jax.block_until_ready(decode_state)
+  end = datetime.datetime.now()
+  insert_avg_seconds = (end - start).total_seconds() / iters
+
   max_utils.deactivate_profiler(config)
-  return np.average(all_prefill_seconds), decode_state
+  return prefill_avg_seconds, insert_avg_seconds, decode_state
 
 
 def prefill_benchmark(config, engine, params, decode_state, tokens, true_length,
@@ -64,34 +71,35 @@ def prefill_benchmark(config, engine, params, decode_state, tokens, true_length,
   print(f"Prefill results for length {tokens.size}:\n")
 
   profile_name = f"prefill_{tokens.size}" if profile_name == "" else profile_name
-  time_in_s, decode_state = prefill_benchmark_loop(config, engine, decode_state, params, tokens, true_length, iters,
+  prefill_avg_seconds, insert_avg_seconds, decode_state = prefill_benchmark_loop(config, engine, decode_state, params, tokens, true_length, iters,
                                                    profile_name=profile_name)
-  prefill_average_ms = time_in_s * 1000
+  prefill_average_ms = prefill_avg_seconds * 1000
+  insert_average_ms = insert_avg_seconds * 1000
   total_prefill_tflops, _, _ = maxtext_utils.calculate_tflops_prefill(num_model_params, tokens.size, config)
   tflops_per_sec_per_device = total_prefill_tflops / jax.device_count() / prefill_average_ms * 1000.
   print(f"\tPrefill step average time: {prefill_average_ms:.3f}ms\n"
         f"\tPrefill total TFLOPs: {total_prefill_tflops:.3f}\n"
         f"\tPrefill TFLOPs/sec/device: {tflops_per_sec_per_device:.3f}\n\n\n\n")
-  result_dict = {"prefill_time_in_ms": prefill_average_ms,
-                 "prefill_total_tflops": total_prefill_tflops,
-                 "prefill_tflops_per_sec_per_device": tflops_per_sec_per_device}
+  result_dict = {
+                  "prefill_time_in_ms": prefill_average_ms,
+                  "prefill_total_tflops": total_prefill_tflops,
+                  "prefill_tflops_per_sec_per_device": tflops_per_sec_per_device,
+                  "insert_time_in_ms": insert_average_ms,
+                }
   return result_dict, decode_state
 
 
 def ar_benchmark_loop(config, engine, decode_state, params, iters, profile_name=""):
   """ Inner loop for benchmarking ar step. """
-  all_generate_seconds = []
   max_utils.activate_profiler(config, profile_name)
+  start = datetime.datetime.now()
   for _ in range(iters):
-    start = datetime.datetime.now()
     decode_state, _ = engine.generate(params, decode_state)
-    jax.block_until_ready(decode_state)
-    end = datetime.datetime.now()
-    generate_seconds = (end - start).total_seconds()
-    all_generate_seconds.append(generate_seconds)
-
+  jax.block_until_ready(decode_state)
+  end = datetime.datetime.now()
+  generate_step_avg_seconds = (end - start).total_seconds() / iters  
   max_utils.deactivate_profiler(config)
-  return np.average(all_generate_seconds), decode_state
+  return generate_step_avg_seconds, decode_state
 
 
 def ar_benchmark(config, engine, params, decode_state, cache_size=None, model_size=None, profile_name="", iters=100):
@@ -105,7 +113,7 @@ def ar_benchmark(config, engine, params, decode_state, cache_size=None, model_si
   # Warmup
   for _ in range(2):
     decode_state, _ = engine.generate(params, decode_state)
-    jax.block_until_ready(decode_state)
+  jax.block_until_ready(decode_state)
 
   profile_name = "autoregress" if profile_name == "" else profile_name
   seconds_per_step, decode_state = ar_benchmark_loop(
