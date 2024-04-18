@@ -75,14 +75,14 @@ def prefill_benchmark(config, engine, params, decode_state, tokens, true_length,
                                                    profile_name=profile_name)
   prefill_average_ms = prefill_avg_seconds * 1000
   insert_average_ms = insert_avg_seconds * 1000
-  total_prefill_tflops, _, _ = maxtext_utils.calculate_tflops_prefill(num_model_params, tokens.size, config)
-  tflops_per_sec_per_device = total_prefill_tflops / jax.device_count() / prefill_average_ms * 1000.
+  total_prefill_tflops_per_device, _, _ = maxtext_utils.calculate_prefill_tflops_per_device(num_model_params, tokens.size, config)
+  tflops_per_sec_per_device = total_prefill_tflops_per_device / prefill_avg_seconds
   print(f"\tPrefill step average time: {prefill_average_ms:.3f}ms\n"
-        f"\tPrefill total TFLOPs: {total_prefill_tflops:.3f}\n"
+        f"\tPrefill total TFLOPs per device: {total_prefill_tflops_per_device:.3f}\n"
         f"\tPrefill TFLOPs/sec/device: {tflops_per_sec_per_device:.3f}\n\n\n\n")
   result_dict = {
                   "prefill_time_in_ms": prefill_average_ms,
-                  "prefill_total_tflops": total_prefill_tflops,
+                  "prefill_total_tflops_per_device": total_prefill_tflops_per_device,
                   "prefill_tflops_per_sec_per_device": tflops_per_sec_per_device,
                   "insert_time_in_ms": insert_average_ms,
                 }
