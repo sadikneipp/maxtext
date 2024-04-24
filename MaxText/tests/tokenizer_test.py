@@ -19,7 +19,7 @@ limitations under the License.
 
 import numpy as np
 import train_tokenizer
-import tokenizer
+from input_pipeline import input_pipeline_interface
 import unittest
 import pytest
 import tensorflow_datasets as tfds
@@ -38,7 +38,7 @@ class TokenizerTest(unittest.TestCase):
     assets_path = "tests"
     vocab_model_name = "test_tokenizer"
     cls.tokenizer_path = os.path.join(assets_path, vocab_model_name)
-    cls.source_tokenizer = tokenizer.load_tokenizer("../assets/tokenizer", add_eos=False, add_bos=False)
+    cls.source_tokenizer = input_pipeline_interface.get_tokenizer("../assets/tokenizer", add_bos=False, add_eos=False)
     os.environ["TFDS_DATA_DIR"] = dataset_path
     read_config = tfds.ReadConfig(
         shuffle_seed=0,
@@ -51,7 +51,7 @@ class TokenizerTest(unittest.TestCase):
         vocab_size=cls.vocab_size,
         max_corpus_chars=cls.max_corpus_chars,
     )
-    cls.test_tokenizer = tokenizer.load_tokenizer(cls.tokenizer_path, add_eos=False, add_bos=False)
+    cls.test_tokenizer = input_pipeline_interface.get_tokenizer(cls.tokenizer_path, add_bos=False, add_eos=False)
 
   @classmethod
   def tearDownClass(cls):
@@ -67,8 +67,8 @@ class TokenizerTest(unittest.TestCase):
   @pytest.mark.tpu
   def test_detokenize(self):
     tokens = [66, 12, 10, 698]
-    self.assertEqual(np.asarray(self.source_tokenizer.detokenize(tokens)), 
-                     np.asarray(self.test_tokenizer.detokenize(tokens)))
+    self.assertEqual(np.asarray(self.source_tokenizer.decode_str(tokens)), 
+                     np.asarray(self.test_tokenizer.decode_str(tokens)))
 
 
 if __name__ == "__main__":

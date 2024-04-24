@@ -73,6 +73,13 @@ MODEL_PARAMS_DICT = {
         "dims_per_head": 128,
         "vocab": 32000,
     },
+    "llama3-8b": {
+        "num_layers": 32,
+        "num_heads": 32,
+        "num_kv_heads": 8,
+        "dims_per_head": 128,
+        "vocab": 128256,
+    },
     "mistral-7b": {
         "num_layers": 32,
         "num_heads": 32,
@@ -125,7 +132,6 @@ def convert(base_model_path, maxtext_model_path, model_size):
     checkpoint = torch.load(ckpt_path, map_location="cpu")
     pytorch_vars[int(ckpt_path.name.split(".", maxsplit=2)[1])] = checkpoint
   pytorch_vars = [pytorch_vars[i] for i in sorted(list(pytorch_vars.keys()))]
-
   layer_key = "gate" if num_experts else "mlp"
   jax_weights = {
       "decoder": {
