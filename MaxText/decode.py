@@ -40,6 +40,7 @@ def main(config):
   prefill_result = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length)
   slot = 0
 
+  # breakpoint()
   decode_state = engine.init_decode_state()
   decode_state = engine.insert(prefill_result, decode_state, slot=slot)
 

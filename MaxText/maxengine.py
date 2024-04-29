@@ -121,6 +121,7 @@ class MaxEngine(engine_api.Engine):
       self.model.quant.quant_mode = quantizations.get_quant_mode("serve")
       return params
 
+
   @functools.partial(jax.jit, static_argnums=(0,))
   def prefill(
       self,
@@ -147,10 +148,26 @@ class MaxEngine(engine_api.Engine):
 
     input_tokens = jnp.expand_dims(padded_tokens, 0)  # [BATCH, SEQUENCE]
     positions = jnp.expand_dims(jnp.arange(0, input_tokens.shape[1]), 0)
-
+    # jax.debug.print("positions {}", positions)
+    
+    # Same as positions, but only 1D instead of 2D
+    # array([ 0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15],
     zero_to_n = jnp.arange(0, padded_tokens.shape[0])
+    # jax.debug.print("zero_to_n {}", zero_to_n)
+
+    # A 1D array of bool values indicating where tokens exist
+    # array([ True,  True,  True,  True, False, False, False, False, False,
+    #  False, False, False, False, False, False, False])
     ones_to_keep = zero_to_n < true_length
+    # jax.debug.print("ones_to_keep {}", ones_to_keep)
+
+    # Changes the boolean 1D array to int32 of 0s and 1s
+    # array([1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], dtype=int32)
     one_d_output = ones_to_keep * common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
+    # jax.debug.print("one_d_output {}", one_d_output)
+
+    # Same as one_d_output, but in 2D
+    # array([[1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]], dtype=int32)
     sequence_indicator = jnp.expand_dims(one_d_output, 0)
 
     with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
@@ -244,13 +261,26 @@ class MaxEngine(engine_api.Engine):
   ) -> DecodeState:
     """Insert into KV cache"""
     unboxed_prefix = max_utils.unbox_logicallypartioned(prefix)
+    # unboxed_prefix.keys() = dict_keys(['cache', 'generated_tokens', 'logits', 'next_pos'])
+    # slot = array(0, dtype=int32)
 
     def copy(path, partial_cache, full_cache, annotations):
+
+      # path: (DictKey(key='decoder'), DictKey(key='layers_0'), DictKey(key='self_attention'), DictKey(key='AttentionOp_0'), DictKey(key='cache_ar_index'))
+      # partial_cache.shape has different shapes at different times: 
+      #   (16, 32, 1, 128)
+      #   (16, 32, 1, 1)
+      #   (16, 32, 8, 1)
+      # full_cache.shape: (16, 32, 8, 1)
+      # annotations: ()
+
+      # cache_ar_index
       path_key = path[-1].key
       if path_key in ["cache_ar_index", "cached_ar_key", "cached_ar_value", "cached_ar_key_scale", "cached_ar_value_scale"]:
         return full_cache  # we don't even zero these out because we can mask them out.
 
       batch_idx = annotations.index("cache_batch") if "cache_batch" in annotations else -1
+      print("batch_idx {}", batch_idx)
       if batch_idx < 0:
         raise ValueError(f"Batch index {batch_idx=} shouldn't be less than zero for {path_key}, got {annotations=}")
 
@@ -258,12 +288,20 @@ class MaxEngine(engine_api.Engine):
         ### goal: zero this out in case there is existing data
         s = list(full_cache.shape)
         s[batch_idx] = 1
+        # cache_ar_segment_id s: [array(1, dtype=int32), array(16, dtype=int32)]
+        # jax.debug.print("cache_ar_segment_id s: {}", s)
         zeros = jnp.zeros(tuple(s), dtype=jnp.int32)
+        # cache_ar_segment_id zeros: [[0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]]
+        # jax.debug.print("cache_ar_segment_id zeros: {}", zeros)
         return jax.lax.dynamic_update_index_in_dim(full_cache, zeros, slot, batch_idx)
       elif path_key == "cache_prefill_segment_id":
         s = list(full_cache.shape)
         s[batch_idx] = 1
+        # cache_prefill_segment_id s: [array(1, dtype=int32), array(16, dtype=int32)]
+        # jax.debug.print("cache_prefill_segment_id s: {}", s)
+        # cache_prefill_segment_id zeros: [[0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]]
         zeros = jnp.zeros(tuple(s), dtype=jnp.int32)
+        # jax.debug.print("cache_prefill_segment_id zeros: {}", zeros)
         ## zero out in case prefill cache is too small to cover
         full_cache = jax.lax.dynamic_update_index_in_dim(full_cache, zeros, slot, batch_idx)
         ## copy prefill cachce
