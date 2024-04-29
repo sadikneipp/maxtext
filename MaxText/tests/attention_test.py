@@ -116,14 +116,17 @@ class AttentionTest(unittest.TestCase):
 
   @pytest.mark.tpu
   def test_autoregression(self):
+    # 16
     prefill_length = self.cfg.max_prefill_predict_length
+
+    # 128
     decode_total_length = self.cfg.max_target_length
     lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(self.dtype)
 
     mha_full = self._attention_as_mha_generic.apply(
-        self._attention_as_mha_generic_variable,
-        lnx,
-        lnx,
+        self._attention_as_mha_generic_variable,  # q
+        lnx,  # k
+        lnx,  # v
         decoder_segment_ids=decoder_segment_ids,
         inputs_positions=decoder_positions,
         deterministic=True,
@@ -132,7 +135,11 @@ class AttentionTest(unittest.TestCase):
     )
 
     lnx_prefill = lnx[:, 0:prefill_length, :]
+
+    # decoder_segment_ids_prefill.shape: (4, 16)
     decoder_segment_ids_prefill = decoder_segment_ids[:, 0:prefill_length]
+
+    # decoder_positions_prefill.shape: (4, 16)
     decoder_positions_prefill = decoder_positions[:, 0:prefill_length]
 
     mha_prefill, output_cache = self._attention_as_mha_generic.apply(
