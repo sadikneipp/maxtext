@@ -45,6 +45,14 @@ def mqa_reference(
   
   # loads the entire batch to its full size each time
   # expects all the entries to be left-aligned, but not necessarily any padding
+  print("ref - q.shape:", q.shape)              
+  print("ref - k.shape:", k.shape)              
+  print("ref - v.shape:", v.shape)              
+  print("ref - lengths.shape:", lengths.shape)  
+  # ref - q.shape: (4, 1, 128)
+  # ref - k.shape: (4, 1024, 128)
+  # ref - v.shape: (4, 1024, 128)
+  # ref - lengths.shape: (4,)
 
   # computes the logits by multiplying q and k
   logits = jnp.einsum(
@@ -142,9 +150,15 @@ def ragged_mqa(
 ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
   """Ragged multi query attention."""
   batch_size, num_heads, head_dim = q.shape 
-#   jax.debug.print("lengths.shape: {}", lengths.shape)
+  print("ragged kernel - q.shape:", q.shape)              
+  print("ragged kernel - k.shape:", k.shape)              
+  print("ragged kernel - v.shape:", v.shape)              
+  print("ragged kernel - lengths.shape:", lengths.shape)  
+  # ragged kernel - q.shape: (4, 1, 128)
+  # ragged kernel - k.shape: (4, 1024, 128)
+  # ragged kernel - v.shape: (4, 1024, 128)
+  # ragged kernel - lengths.shape: (4,)
   assert lengths.shape == (batch_size,)
-#   jax.debug.print("lengths.dtype: {}", lengths.dtype)
   assert lengths.dtype == jnp.int32
   seq_len = k.shape[1]  
 
