@@ -262,12 +262,12 @@ class AttentionOp(nn.Module):
         shard_map,
         mesh=self.mesh,
         in_specs=(
-            P(None), # (BATCH, HEAD, LENGTH, D_KV)
-            P(None), # (BATCH, HEAD, LENGTH, D_KV)
-            P(None), # (BATCH, HEAD, LENGTH, D_KV)
-            P(None),
+            P('tensor', None, None, None),
+            P('tensor', None, None, None),
+            P('tensor', None, None, None),
+            P('tensor'),
         ),
-        out_specs=P(None),
+        out_specs=P('tensor', None, None, None),
         check_rep=False,
     )
     def wrap_ragged_attention(query, key, value, decoder_segment_ids):
