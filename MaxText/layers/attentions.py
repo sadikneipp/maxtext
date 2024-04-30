@@ -185,28 +185,20 @@ class AttentionOp(nn.Module):
     # query.shape=(4, 1, 32, 128), ar_kv_cache[0].shape=(4, 1024, 32, 128), ar_kv_cache[1].shape=(4, 1024, 32, 128)
     self.check_attention_inputs(query, key, value)
     length = query.shape[-3]
-    if (
-        self.attention_kernel == "dot_product"
-        or (self.attention_kernel == "autoselected" and model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE)
-        or (self.attention_kernel == "autoselected" and length < 128)
-    ):
     if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE and decoder_segment_ids is not None:
     # if False:
     # if True:
-      # query = query.squeeze()           # (b,s=1,n,d) -> (b,n,d)
       query = jnp.swapaxes(query, 1, 2)     # (b,s,n,d) -> (b,n,s,d)
       key = jnp.swapaxes(key, 1, 2)     # (b,s,n,d) -> (b,n,s,d)
       value = jnp.swapaxes(value, 1, 2) # (b,s,n,d) -> (b,n,s,d)
       print(f"\nAR - {query.shape=}") 
       print(f"AR - {key.shape=}")
       print(f"AR - {value.shape=}")
-      # Vmap across k and v's [1] dimension which is num_heads
-      # TODO: this works for vmapped version of mqa_ref, but breaks for ragged_mqa
       # NotImplementedError: Mosaic kernels cannot be automatically partitioned. Please wrap the call in a shard_map or xmap.
-      # vmap_ragged_mqa = jax.vmap(ragged_mqa, in_axes=[1, 1, 1, None], out_axes=2)
-      # return vmap_ragged_mqa(query, key, value, decoder_segment_ids.sum(axis=1))
-      vmap_ref_mqa = jax.vmap(mqa_reference, in_axes=[1, 1, 1, None], out_axes=2)
-      return vmap_ref_mqa(query, key, value, decoder_segment_ids.sum(axis=1))
+      vmap_ragged_mqa = jax.vmap(ragged_mqa, in_axes=[1, 1, 1, None], out_axes=2)
+      return vmap_ragged_mqa(query, key, value, decoder_segment_ids.sum(axis=1))
+      # vmap_ref_mqa = jax.vmap(mqa_reference, in_axes=[1, 1, 1, None], out_axes=2)
+      # return vmap_ref_mqa(query, key, value, decoder_segment_ids.sum(axis=1))
     elif self.attention_kernel == 'dot_product' or\
           (self.attention_kernel == 'autoselected' and model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE) or\
           (self.attention_kernel == 'autoselected' and length < 128):
@@ -227,7 +219,7 @@ class AttentionOp(nn.Module):
       return self.cudnn_flash_attention(query, key, value, decoder_segment_ids, model_mode), None, None
     else:
       raise ValueError(f"Unexpected attention kernel {self.attention_kernel=}.")
-
+  
   def tpu_flash_attention(self, query: Array, key: Array, value: Array, decoder_segment_ids: Array | None) -> Array:
     """TPU Flash Attention."""
     # Transpose to ('batch', 'heads', 'length', 'kv')
@@ -282,7 +274,6 @@ class AttentionOp(nn.Module):
     )
     x = wrap_flash_attention(query, key, value, decoder_segment_ids)
     x = jnp.transpose(x, axes=(0, 2, 1, 3))
-    # jax.debug.breakpoint()
     return x
 
   def cudnn_flash_attention(
@@ -320,6 +311,7 @@ class AttentionOp(nn.Module):
         transpose_batch_sequence=False,
     )
     return dpa_layer(query, key, value, mask=attn_mask)
+    
 
   def compute_local_attention(self, attn_weights: Array, value: Array) -> tuple[Array, Array, Array]:
     """Computes the attention of a local subset of the kv cache.
@@ -869,7 +861,7 @@ class AttentionOp(nn.Module):
     )
 
     if ar_unnormalized_output is not None:
-      print("\nWe have AR output.")
+      print("\n AR output.")
       print(f"{query.shape=}, {prefill_kv_cache[0].shape=}, {prefill_kv_cache[1].shape=}")
       print(f"{query.shape=}, {ar_kv_cache[0].shape=}, {ar_kv_cache[1].shape=}")
       prefill_exponentials_max = jnp.expand_dims(prefill_exponentials_max, axis=-1)
