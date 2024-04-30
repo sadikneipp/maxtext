@@ -205,9 +205,6 @@ class AttentionOp(nn.Module):
     # if model_mode != common_types.MODEL_MODE_AUTOREGRESSIVE:
     # if False:
     # if True:
-      # query = jnp.swapaxes(query, 1, 2)     # (b,s,n,d) -> (b,n,s,d)
-      # key = jnp.swapaxes(key, 1, 2)     # (b,s,n,d) -> (b,n,s,d)
-      # value = jnp.swapaxes(value, 1, 2) # (b,s,n,d) -> (b,n,s,d)
       # NotImplementedError: Mosaic kernels cannot be automatically partitioned. Please wrap the call in a shard_map or xmap.
       # vmap_ragged_mqa = jax.vmap(ragged_mqa, in_axes=[1, 1, 1, None], out_axes=2)
       # return vmap_ragged_mqa(query, key, value, decoder_segment_ids.sum(axis=1))
@@ -238,9 +235,9 @@ class AttentionOp(nn.Module):
   def ragged_attention(self, query: Array, key: Array, value: Array, decoder_segment_ids: Array) -> Array:
     """Ragged Attention."""
     # Transpose to ('batch', 'heads', 'length', 'kv')
-    query = jnp.transpose(query, axes=(0, 2, 1, 3))
-    key = jnp.transpose(key, axes=(0, 2, 1, 3))
-    value = jnp.transpose(value, axes=(0, 2, 1, 3))
+    query = jnp.swapaxes(query, 1, 2)     # (b,s,n,d) -> (b,n,s,d)
+    key = jnp.swapaxes(key, 1, 2)     # (b,s,n,d) -> (b,n,s,d)
+    value = jnp.swapaxes(value, 1, 2) # (b,s,n,d) -> (b,n,s,d)
     decoder_segment_ids = decoder_segment_ids.sum(axis=1)
     print("ragged_attention - q.shape:", query.shape)
     print("ragged_attention - k.shape:", key.shape)
@@ -251,13 +248,7 @@ class AttentionOp(nn.Module):
     # ragged_attention - v.shape: (4, 32, 1024, 128)
     # ragged_attention - l.shape: (4,)
 
-    axis_names = nn.logical_to_mesh_axes(self.flash_axis_names)
-    print("flash_axis_names:", self.flash_axis_names)
-    print("axis_names:", axis_names)
-    # flash_axis_names: ('activation_batch', 'activation_heads', 'activation_length', 'activation_kv')
-    # axis_names: PartitionSpec(('data', 'fsdp', 'fsdp_transpose'), ('tensor', 'sequence'), None, None)
-    segment_axis_names = nn.logical_to_mesh_axes((HEAD, "activation_length_no_heads")) 
-
+    @jax.jit
     @functools.partial(
         shard_map,
         mesh=self.mesh,
@@ -275,11 +266,16 @@ class AttentionOp(nn.Module):
       print("wrap ragged attention - k.shape:", key.shape) 
       print("wrap ragged attention - v.shape:", value.shape) 
       print("wrap ragged attention - l.shape:", decoder_segment_ids.shape) 
+      # wrap ragged attention - q.shape: (4, 32, 1, 128)
+      # wrap ragged attention - k.shape: (4, 32, 1024, 128)
+      # wrap ragged attention - v.shape: (4, 32, 1024, 128)
+      # wrap ragged attention - l.shape: (4,)
+
       # wrap ragged attention - q.shape: (4, 8, 1, 128)
       # wrap ragged attention - k.shape: (4, 8, 1024, 128)
       # wrap ragged attention - v.shape: (4, 8, 1024, 128)
       # wrap ragged attention - l.shape: (4,)
-      vmap_ragged_mqa = jax.vmap(ragged_mqa, in_axes=[1, 1, 1, None], out_axes=2)
+      vmap_ragged_mqa = jax.jit(jax.vmap(ragged_mqa, in_axes=[1, 1, 1, None], out_axes=2))
       return vmap_ragged_mqa(query, key, value, decoder_segment_ids)
 
     devices_in_data_fsdp = self.mesh.shape["data"] * self.mesh.shape["fsdp"]
@@ -287,12 +283,7 @@ class AttentionOp(nn.Module):
         "Batch dimension should be shardable among the devices in data and fsdp" " axis"
     )
 
-    x = wrap_ragged_attention(query, key, value, decoder_segment_ids)
-    # print("x: ", x[0].shape)    # x:  (4, 4, 8, 128)
-    # xt = jnp.transpose(x[0], axes=(0, 2, 1, 3))
-    # print("xT: ", x[0].shape)
-    
-    return x
+    return wrap_ragged_attention(query, key, value, decoder_segment_ids)
     
   
   def tpu_flash_attention(self, query: Array, key: Array, value: Array, decoder_segment_ids: Array | None) -> Array:
