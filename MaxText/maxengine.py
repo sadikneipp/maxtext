@@ -147,6 +147,7 @@ class MaxEngine(engine_api.Engine):
       raise ValueError("We don't know what to do with existing_prefix")
 
     input_tokens = jnp.expand_dims(padded_tokens, 0)  # [BATCH, SEQUENCE]
+    lengths = jnp.expand_dims(true_length, 0)  # [BATCH, SEQUENCE]
     positions = jnp.expand_dims(jnp.arange(0, input_tokens.shape[1]), 0)
     # jax.debug.print("positions {}", positions)
     
@@ -180,6 +181,7 @@ class MaxEngine(engine_api.Engine):
           model_mode=common_types.MODEL_MODE_PREFILL,
           rngs={"params": self.rng},
           mutable=["cache"],
+          lengths=lengths,
       )
 
     next_pos = jnp.full((1, 1), true_length, dtype=jnp.int32)
