@@ -300,6 +300,7 @@ class Decoder(nn.Module):
           decoder_positions,
           deterministic,
           model_mode,
+          lengths,
       )
     else:
       for lyr in range(cfg.num_decoder_layers):
@@ -309,6 +310,7 @@ class Decoder(nn.Module):
             decoder_positions,
             deterministic,
             model_mode,
+            lengths,
         )
 
     y = self.get_norm_layer()(

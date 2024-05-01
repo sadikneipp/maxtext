@@ -63,6 +63,7 @@ class LlamaDecoderLayer(nn.Module):
       decoder_positions,
       deterministic,
       model_mode,
+      lengths,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -105,6 +106,7 @@ class LlamaDecoderLayer(nn.Module):
         decoder_segment_ids=decoder_segment_ids,
         deterministic=deterministic,
         model_mode=model_mode,
+        lengths=lengths,
     )
 
     attention_lnx = nn.with_logical_constraint(attention_lnx, ("activation_batch", "activation_length", "activation_embed"))

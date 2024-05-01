@@ -214,10 +214,17 @@ class AttentionOp(nn.Module):
       # return vmap_ref_mqa(query, key, value, decoder_segment_ids.sum(axis=1))
       # vmap_ragged_mqa = jax.jit(jax.vmap(ragged_mqa, in_axes=[1, 1, 1, None], out_axes=2))
       # return vmap_ragged_mqa(query, key, value, decoder_segment_ids.sum(axis=1))
+    # if model_mode == common_types.MODEL_MODE_PREFILL:
+    # try:
+    #   print(f"{lengths=}")
+    # except:
+    #   print("lengths does not exist")
+    #   # breakpoint()
+    #   pass
     if model_mode == common_types.MODEL_MODE_PREFILL and lengths is not None: 
     # if False:
       print(f"Calling prefill ragged attention with lengths: {lengths.shape}")
-      return self.ragged_attention(query, key, value, decoder_segment_ids, lengths)
+      return self.ragged_attention(query, key, value, lengths)
     elif self.attention_kernel == 'dot_product' or\
           (self.attention_kernel == 'autoselected' and model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE) or\
           (self.attention_kernel == 'autoselected' and length < 128):
@@ -280,6 +287,7 @@ class AttentionOp(nn.Module):
       print("wrap ragged attention - k.shape:", key.shape) 
       print("wrap ragged attention - v.shape:", value.shape) 
       print("wrap ragged attention - lengths.shape:", lengths.shape) 
+      jax.debug.print("lengths: {}", lengths)
       # print("wrap ragged attention - l.shape:", decoder_segment_ids.shape) 
       # wrap ragged attention - q.shape: (4, 32, 1, 128)
       # wrap ragged attention - k.shape: (4, 32, 1024, 128)
@@ -298,7 +306,7 @@ class AttentionOp(nn.Module):
         "Batch dimension should be shardable among the devices in data and fsdp" " axis"
     )
 
-    return wrap_ragged_attention(query, key, value, decoder_segment_ids)
+    return wrap_ragged_attention(query, key, value, lengths)
     
   
   def tpu_flash_attention(self, query: Array, key: Array, value: Array, decoder_segment_ids: Array | None) -> Array:
@@ -867,9 +875,9 @@ class AttentionOp(nn.Module):
     Returns:
         Array: Combined attention that has been normalized
     """
-    print(f"local_outs: {local_outs[0].shape=}, {local_outs[1].shape=}")
-    print(f"local_maxes?: {local_maxes[0].shape=}, {local_maxes[1].shape=}")
-    print(f"local_sums?: {local_sums[0].shape=}, {local_sums[1].shape=}")
+    # print(f"local_outs: {local_outs[0].shape=}, {local_outs[1].shape=}")
+    # print(f"local_maxes?: {local_maxes[0].shape=}, {local_maxes[1].shape=}")
+    # print(f"local_sums?: {local_sums[0].shape=}, {local_sums[1].shape=}")
     # Comparing original call to ragged
     
     # local_outs: local_outs[0].shape=(4, 1, 32, 128), local_outs[1].shape=(4, 1, 32, 128)
@@ -914,7 +922,7 @@ class AttentionOp(nn.Module):
   @nn.compact
   def __call__(self, query, key, value, decoder_segment_ids, model_mode, lengths):
     prefill_kv_cache, ar_kv_cache = self.kv_cache(key, value, decoder_segment_ids, model_mode)
-
+    # breakpoint()
 
     # Prefill Step 7
     prefill_unnormalized_output, prefill_exponentials_max, prefill_exponentials_sum = self.apply_attention(
@@ -928,8 +936,8 @@ class AttentionOp(nn.Module):
 
     # Return the "prefill" cache if it actually the combined prefill+ar kv cache
     if ar_kv_cache is None:
-      if prefill_exponentials_sum is not None:
-        return prefill_unnormalized_output / prefill_exponentials_sum
+      # if prefill_exponentials_sum is not None:
+      #   return prefill_unnormalized_output / prefill_exponentials_sum
       return prefill_unnormalized_output
 
     ar_unnormalized_output, ar_exponentials_max, ar_exponentials_sum = self.apply_attention(
