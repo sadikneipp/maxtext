@@ -147,7 +147,7 @@ def ragged_mqa(
     *, 
     bk: int = 128,
     mask_value: float = DEFAULT_MASK_VALUE,
-) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
+) -> tuple[jax.Array, jax.Array, jax.Array]:
   """Ragged multi query attention."""
   batch_size, num_heads, head_dim = q.shape 
   print("ragged kernel - q.shape:", q.shape)              
