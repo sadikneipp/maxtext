@@ -172,8 +172,9 @@ class MaxEngine(engine_api.Engine):
     )
     selected_logits = jax.lax.with_sharding_constraint(selected_logits, self.replicated_sharding)
 
-    # delete the "cached_ar_key" and "cached_ar_value" keys would cause error in insert() function
-    # so set cached_ar_key/cached_ar_value to dummy shape (1,) value to save memory
+    # Don't need to return generate cache: "cached_ar_key" and "cached_ar_value" 
+    # Delete the "cached_ar_key" and "cached_ar_value" keys would cause error in insert() function
+    # Set cached_ar_key/cached_ar_value to dummy shape (1,) value to save memory
     for i in range(self.config.num_decoder_layers):
       if f"layers_{i}" in new_vars["cache"]["decoder"]:
         new_vars["cache"]["decoder"][f"layers_{i}"]["self_attention"]["AttentionOp_0"]["cached_ar_key"] = jnp.zeros(
