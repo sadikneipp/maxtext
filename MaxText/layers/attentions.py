@@ -157,8 +157,7 @@ class AttentionOp(nn.Module):
       key: Array,
       value: Array,
       decoder_segment_ids: Array | None,
-      model_mode: str, 
-      ragged: bool = False):
+      model_mode: str):
 
     # model_mode: 'prefill' 
       # query.shape:  (4, 1024, 16, 256)   (b, s, n, d)
@@ -202,15 +201,7 @@ class AttentionOp(nn.Module):
     self.check_attention_inputs(query, key, value)
     length = query.shape[-3]
     if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE and decoder_segment_ids is not None:
-    # if model_mode != common_types.MODEL_MODE_AUTOREGRESSIVE:
-    # if False:
-    # if True:
-      # NotImplementedError: Mosaic kernels cannot be automatically partitioned. Please wrap the call in a shard_map or xmap.
-      # vmap_ragged_mqa = jax.vmap(ragged_mqa, in_axes=[1, 1, 1, None], out_axes=2)
-      # return vmap_ragged_mqa(query, key, value, decoder_segment_ids.sum(axis=1))
-      # vmap_ref_mqa = jax.vmap(mqa_reference, in_axes=[1, 1, 1, None], out_axes=2)
-      # return vmap_ref_mqa(query, key, value, decoder_segment_ids.sum(axis=1))
-      return self.ragged_attention(jnp.swapaxes(query, 1, 2), jnp.swapaxes(key, 1, 2), jnp.swapaxes(value, 1, 2), decoder_segment_ids)
+      return self.ragged_attention(query, key, value, decoder_segment_ids)
     elif self.attention_kernel == 'dot_product' or\
           (self.attention_kernel == 'autoselected' and model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE) or\
           (self.attention_kernel == 'autoselected' and length < 128):
@@ -232,15 +223,23 @@ class AttentionOp(nn.Module):
     else:
       raise ValueError(f"Unexpected attention kernel {self.attention_kernel=}.")
   
+     
   def ragged_attention(self, query: Array, key: Array, value: Array, decoder_segment_ids: Array) -> tuple[Array, Array, Array]:
     """Ragged Attention."""
+    @jax.jit
+    def swap_axes(q, k, v):
+      q = jnp.swapaxes(q, 1, 2)
+      k = jnp.swapaxes(k, 1, 2)
+      v = jnp.swapaxes(v, 1, 2)
+      return q, k, v
+
     decoder_segment_ids = decoder_segment_ids.sum(axis=1)
     print("ragged_attention - q.shape:", query.shape)
     print("ragged_attention - k.shape:", key.shape)
     print("ragged_attention - v.shape:", value.shape)
     print("ragged_attention - l.shape:", decoder_segment_ids.shape)
+    query, key, value = swap_axes(query, key, value)
 
-    # @jax.jit
     @functools.partial(
         shard_map,
         mesh=self.mesh,
@@ -272,7 +271,7 @@ class AttentionOp(nn.Module):
 
     o,m,l = wrap_ragged_attention(query, key, value, decoder_segment_ids)
     print(f"ragged_attention result - {o.shape=}")
-    return jnp.swapaxes(o, 1, 2), jnp.swapaxes(m, 1, 2), jnp.swapaxes(l, 1, 2)
+    return swap_axes(o, m, l)
     
   
   def tpu_flash_attention(self, query: Array, key: Array, value: Array, decoder_segment_ids: Array | None) -> Array:
@@ -379,7 +378,7 @@ class AttentionOp(nn.Module):
         aqt_rng (PRNGKey | None): Optional rng
 
     Returns:
-        (local_out, local_max,): where
+        (local_out, local_max, local_sum): where
           local_out is local unnormalized output
           local_max is the local max of exponentials
           local_sum is the sum of exponentials for this chunk, divided by exp(local_max).
@@ -406,23 +405,6 @@ class AttentionOp(nn.Module):
       model_mode: str = common_types.MODEL_MODE_TRAIN,
   ):
     """Apply Attention."""
-    # query.shape: (16, 1, 8, 32) 
-    # key.shape: (16, 32, 8, 32)
-    # value.shape: (16, 32, 8, 32) 
-    # Casting qk_product and softmaxt computation for float32 for model stability.
-    # jax.debug.breakpoint()
-    # if decoder_segment_ids is not None:
-    #   jax.debug.print("")
-    #   jax.debug.print("decoder_segment_ids.sum: {}", decoder_segment_ids.sum(axis=1))
-    #   jax.debug.print("decoder_segment_ids.shape: {}", decoder_segment_ids.shape)
-    #   jax.debug.print("query.shape: {}", query.shape)
-    #   jax.debug.print("key.shape: {}", key.shape)
-    #   jax.debug.print("value.shape: {}", value.shape)
-    #   jax.debug.print("")
-    # else:
-    #   print(f"Decoder is None in {model_mode}")
-    # if decoder_segment_ids is not None:
-    #   lengths = decoder_segment_ids.sum(axis=1)
     if self.float32_qk_product:
       query = query.astype(jnp.float32)
       key = key.astype(jnp.float32)
@@ -887,10 +869,37 @@ class AttentionOp(nn.Module):
 
   @nn.compact
   def __call__(self, query, key, value, decoder_segment_ids, model_mode):
+    # Starting AttentionOp Call.
+    #     model_mode='autoregressive'
+    #     query.shape=(16, 1, 32, 128)
+    #     key.shape=(16, 1, 32, 128)
+    #     value.shape=(16, 1, 32, 128)
+    #     decoder_segment_ids is None
+    print()
+    print("Starting AttentionOp Call.")
+    print(f"\t{model_mode=}")
+    print(f"\t{query.shape=}")
+    print(f"\t{key.shape=}")
+    print(f"\t{value.shape=}")
+    if decoder_segment_ids is not None: 
+      print(f"\t{decoder_segment_ids.shape=}")
+    else:
+      print("\tdecoder_segment_ids is None")
     prefill_kv_cache, ar_kv_cache = self.kv_cache(key, value, decoder_segment_ids, model_mode)
 
 
-    # Prefill Step 7
+    #     prefill_kv_cache[0].shape=(16, 1024, 32, 128), prefill_kv_cache[1].shape=(16, 1024, 32, 128)
+    #     ar_kv_cache[0].shape=(16, 1024, 32, 128), ar_kv_cache[1].shape=(16, 1024, 32, 128)
+    if prefill_kv_cache is not None:
+      print(f"\t{prefill_kv_cache[0].shape=}, {prefill_kv_cache[1].shape=}")
+    else:
+      print("\tprefill_kv_cache = None")
+    if ar_kv_cache is not None:
+      print(f"\t{ar_kv_cache[0].shape=}, {ar_kv_cache[1].shape=}")
+    else:
+      print("\tar_kv_cache = None")
+
+    # What does this do during AR phase? 
     prefill_unnormalized_output, prefill_exponentials_max, prefill_exponentials_sum = self.apply_attention(
         query=query,
         key=prefill_kv_cache[0],
@@ -899,12 +908,32 @@ class AttentionOp(nn.Module):
         model_mode=model_mode,
     )
 
+    # prefill_unnormalized_output.shape=(16, 1, 32, 128)
+    # prefill_exponentials_max.shape=(16, 1, 32)
+    # prefill_exponentials_sum.shape=(16, 1, 32)
+    print("\toutput of prefill apply_attention call:")
+    if prefill_unnormalized_output is not None:
+      print(f"\t\t{prefill_unnormalized_output.shape=}")
+    else:
+      print("\t\tprefill_unnormalized_output: None")
+    
+    if prefill_exponentials_max is not None:
+      print(f"\t\t{prefill_exponentials_max.shape=}")
+    else: 
+      print("\t\tprefill_exponentials_max: None")
+
+    if prefill_exponentials_sum is not None: 
+      print(f"\t\t{prefill_exponentials_sum.shape=}")
+    else:
+      print("\t\tprefill_exponentials_sum: None")
+      
+
     # Return the "prefill" cache if it actually the combined prefill+ar kv cache
     if ar_kv_cache is None:
-      # print("ar_kv_cache is None")
       if prefill_exponentials_sum is not None:
-        # print("prefill_exponentials_sum is not None")
+        print("\t\tprefill_exponentials_sum is not None, returning normalized outputs")
         return prefill_unnormalized_output / prefill_exponentials_sum
+      print("\t\tar_kv_cache is None, returning unnormalized outputs(?)")
       return prefill_unnormalized_output
 
     ar_unnormalized_output, ar_exponentials_max, ar_exponentials_sum = self.apply_attention(
@@ -914,19 +943,32 @@ class AttentionOp(nn.Module):
         decoder_segment_ids=ar_kv_cache[2],
         model_mode=model_mode,
     )
+    print("\toutput of ar apply_attention call:")
+    # ar_unnormalized_output.shape=(16, 1, 32, 128)
+    # ar_exponentials_max.shape=(16, 1, 32)
+    # ar_exponentials_sum.shape=(16, 1, 32)
 
     if ar_unnormalized_output is not None:
-      print("\n AR output.")
-      print(f"{query.shape=}, {prefill_kv_cache[0].shape=}, {prefill_kv_cache[1].shape=}")
-      print(f"{query.shape=}, {ar_kv_cache[0].shape=}, {ar_kv_cache[1].shape=}")
+      print(f"\t\t{ar_unnormalized_output.shape=}")
+    else:
+      print(f"\t\tar_unnormalized_output: None")
+
+    if ar_exponentials_max is not None:
+      print(f"\t\t{ar_exponentials_max.shape=}")
+    else:
+      print(f"\t\tar_exponentials_max: None")
+
+    if ar_exponentials_sum is not None:
+      print(f"\t\t{ar_exponentials_sum.shape=}")
+    else:
+      print(f"\t\tar_exponentials_sum: None")
+      
+
+    if ar_unnormalized_output is not None:
       prefill_exponentials_max = jnp.expand_dims(prefill_exponentials_max, axis=-1)
       prefill_exponentials_sum = jnp.expand_dims(prefill_exponentials_sum, axis=-1)
       ar_exponentials_max = jnp.expand_dims(ar_exponentials_max, axis=-1)
       ar_exponentials_sum = jnp.expand_dims(ar_exponentials_sum, axis=-1)
-      print(f"{prefill_unnormalized_output.shape=}, {ar_unnormalized_output.shape=}")
-      print(f"{prefill_exponentials_max.shape=}, {ar_exponentials_max.shape=}")
-      print(f"{prefill_exponentials_sum.shape=}, {ar_exponentials_sum.shape=}")
-      # We have AR output.
       unnormalized_outputs = [prefill_unnormalized_output, ar_unnormalized_output]
       exponentials_maxes = [prefill_exponentials_max, ar_exponentials_max]
       exponentials_sums = [prefill_exponentials_sum, ar_exponentials_sum]
@@ -1137,7 +1179,6 @@ class Attention(nn.Module):
         dtype=self.dtype,
     )
 
-    # Prefill Step 6
     out = attention_op(query, key, value, decoder_segment_ids, model_mode)
 
     out = nn.with_logical_constraint(out, self.out_axis_names)
