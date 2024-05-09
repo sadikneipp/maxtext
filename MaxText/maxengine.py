@@ -258,22 +258,57 @@ class MaxEngine(engine_api.Engine):
     """Insert into KV cache"""
     unboxed_prefix = max_utils.unbox_logicallypartioned(prefix)
 
-    def copy(path, full_cache, partial_cache, annotations):
-      path_key = path[-1].key
-      if path_key in ["cache_ar_index", "cached_ar_key", "cached_ar_value", "cached_ar_key_scale", "cached_ar_value_scale"]:
-        return full_cache  # we don't even zero these out because we can mask them out.
+    # def copy(path, full_cache, partial_cache, annotations):
+    #   path_key = path[-1].key
+    #   if path_key in ["cache_ar_index", "cached_ar_key", "cached_ar_value", "cached_ar_key_scale", "cached_ar_value_scale"]:
+    #     return full_cache  # we don't even zero these out because we can mask them out.
 
-      batch_idx = annotations.index("cache_batch") if "cache_batch" in annotations else -1
-      if batch_idx < 0:
-        raise ValueError(f"Batch index {batch_idx=} shouldn't be less than zero for {path_key}, got {annotations=}")
+    #   batch_idx = annotations.index("cache_batch") if "cache_batch" in annotations else -1
+    #   if batch_idx < 0:
+    #     raise ValueError(f"Batch index {batch_idx=} shouldn't be less than zero for {path_key}, got {annotations=}")
 
-      if path_key == "cache_ar_segment_id":
-        ### goal: zero this out in case there is existing data
+    #   if path_key == "cache_ar_segment_id":
+    #     ### goal: zero this out in case there is existing data
+    #     s = list(full_cache.shape)
+    #     s[batch_idx] = 1
+    #     zeros = jnp.zeros(tuple(s), dtype=jnp.int32)
+    #     return jax.lax.dynamic_update_index_in_dim(full_cache, zeros, slot, batch_idx)
+    #   elif path_key == "cache_prefill_segment_id":
+    #     s = list(full_cache.shape)
+    #     s[batch_idx] = 1
+    #     zeros = jnp.zeros(tuple(s), dtype=jnp.int32)
+    #     ## zero out in case prefill cache is too small to cover
+    #     full_cache = jax.lax.dynamic_update_index_in_dim(full_cache, zeros, slot, batch_idx)
+    #     ## copy prefill cachce
+    #     full_cache = jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
+    #     return full_cache
+    #   elif path_key in [
+    #       "cached_prefill_key",
+    #       "cached_prefill_value",
+    #       "cached_prefill_key_scale",
+    #       "cached_prefill_value_scale",
+    #   ]:
+    #     return jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
+    #   else:
+    #     raise ValueError(f"We don't have a strategy for inserting {path_key}")
+    
+    def copy_cache(full_cache, prefill_cache):
+      
+      def reset_cache(full_cache, annotations):
+        batch_idx = annotations.index("cache_batch") if "cache_batch" in annotations else -1
+        # if batch_idx < 0:
+        #   raise ValueError(f"Batch index {batch_idx=} shouldn't be less than zero for {path_key}, got {annotations=}")
+        
         s = list(full_cache.shape)
         s[batch_idx] = 1
         zeros = jnp.zeros(tuple(s), dtype=jnp.int32)
         return jax.lax.dynamic_update_index_in_dim(full_cache, zeros, slot, batch_idx)
-      elif path_key == "cache_prefill_segment_id":
+
+      def copy_prefill_segment_id(partial_cache, full_cache, annotations):
+        batch_idx = annotations.index("cache_batch") if "cache_batch" in annotations else -1
+        # if batch_idx < 0:
+        #   raise ValueError(f"Batch index {batch_idx=} shouldn't be less than zero for {path_key}, got {annotations=}")
+
         s = list(full_cache.shape)
         s[batch_idx] = 1
         zeros = jnp.zeros(tuple(s), dtype=jnp.int32)
@@ -282,19 +317,48 @@ class MaxEngine(engine_api.Engine):
         ## copy prefill cachce
         full_cache = jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
         return full_cache
-      elif path_key in [
+      
+      def copy_prefill_cache(partial_cache, full_cache, annotations):
+        batch_idx = annotations.index("cache_batch") if "cache_batch" in annotations else -1
+        # if batch_idx < 0:
+        #   raise ValueError(f"Batch index {batch_idx=} shouldn't be less than zero for {path_key}, got {annotations=}")
+        jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
+      
+      for key in full_cache.keys():
+        if key in ["cache_ar_index", "cached_ar_key", "cached_ar_value", "cached_ar_key_scale", "cached_ar_value_scale"]:
+          continue
+        if key == "cached_ar_segment_id":
+          full_cache[key] = jax.tree_util.tree_map(
+            reset_cache,
+            decode_state[key],
+            self.kv_cache_annotations_named[key]
+          )
+        elif key == "cache_prefill_segment_id":
+          full_cache[key] = jax.tree_util.tree_map(
+            copy_prefill_segment_id,
+            prefill_cache[key],
+            decode_state[key],
+            self.kv_cache_annotations_named[key]
+          )
+        elif key in [
           "cached_prefill_key",
           "cached_prefill_value",
           "cached_prefill_key_scale",
           "cached_prefill_value_scale",
-      ]:
-        return jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
-      else:
-        raise ValueError(f"We don't have a strategy for inserting {path_key}")
+        ]:
+          full_cache[key] = jax.tree_util.tree_map(
+            copy_prefill_cache,
+            prefill_cache[key],
+            decode_state[key],
+            self.kv_cache_annotations_named[key]
+          )
+        else:
+          raise ValueError(f"We don't have a strategy for inserting {key}")
+      return full_cache
+    
+    # insert prefill cache into deccode_state
+    inserted_cache = copy_cache(decode_state["cache"], unboxed_prefix["cache"])
 
-    inserted_cache = jax.tree_util.tree_map_with_path(
-      copy, decode_state["cache"], unboxed_prefix["cache"], self.kv_cache_annotations_named
-    )
     inserted_logits = jax.lax.dynamic_update_index_in_dim(decode_state["logits"], unboxed_prefix["logits"], slot, 0)
     inserted_next_pos = jax.lax.dynamic_update_index_in_dim(decode_state["next_pos"], unboxed_prefix["next_pos"], slot, 0)
     inserted_generated_tokens = jax.lax.dynamic_update_index_in_dim(
