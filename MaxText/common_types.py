@@ -40,5 +40,6 @@ D_KV = "activation_kv"
 MODEL_MODE_AUTOREGRESSIVE = "autoregressive"
 MODEL_MODE_PREFILL = "prefill"
 MODEL_MODE_TRAIN = "train"
+MODEL_MODE_INIT = "init"
 
 DECODING_ACTIVE_SEQUENCE_INDICATOR = 1

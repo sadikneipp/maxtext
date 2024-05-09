@@ -504,6 +504,14 @@ class AttentionOp(nn.Module):
     value_vars = (cached_value, cached_value_scale_var)
     return key_vars, value_vars, cached_segment_id, cache_index
 
+  def kv_cache_init(self, key: Array, value: Array, decoder_segment_ids: Array):
+    key, value, decoder_segment_ids = self.kv_cache_prefill(key, value, decoder_segment_ids)
+
+    # initialize autoregressive cache
+    batch, sequence, heads, kv_head_size = key.shape
+    self._get_ar_cache(batch, heads, kv_head_size, self.quantize_kvcache)
+    return key, value, decoder_segment_ids
+
   def kv_cache_prefill(
       self,
       key: Array,
@@ -528,7 +536,25 @@ class AttentionOp(nn.Module):
     cached_prefill_key_var, cached_prefill_value_var, cached_prefill_segment_id = self._get_prefill_cache(
         batch, heads, kv_head_size, self.quantize_kvcache
     )
-    self._get_ar_cache(batch, heads, kv_head_size, self.quantize_kvcache)  # initialize it now
+    # cached_ar_key_var, cached_ar_value_var, _, _ = self._get_ar_cache(batch, heads, kv_head_size, self.quantize_kvcache)  # initialize it now
+    # cached_ar_key_var[0].value = nn.with_logical_constraint(
+    #     cached_ar_key_var[0].value,
+    #     (
+    #         "cache_sequence",
+    #         "cache_heads",
+    #         "cache_batch",
+    #         "cache_kv",
+    #     ),
+    # )
+    # cached_ar_value_var[0].value = nn.with_logical_constraint(
+    #     cached_ar_value_var[0].value,
+    #     (
+    #         "cache_sequence",
+    #         "cache_heads",
+    #         "cache_batch",
+    #         "cache_kv",
+    #     ),
+    # )
 
     key_shaped_for_cache = self.move_kvlen_axis(key)
     value_shaped_for_cache = self.move_kvlen_axis(value)
@@ -708,6 +734,8 @@ class AttentionOp(nn.Module):
       return (key, value, decoder_segment_ids), None
     elif model_mode == common_types.MODEL_MODE_PREFILL:
       return self.kv_cache_prefill(key, value, decoder_segment_ids), None
+    elif model_mode == common_types.MODEL_MODE_INIT:
+      return self.kv_cache_init(key, value, decoder_segment_ids), None
     elif model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
       return self.kv_cache_autoregressive(key, value)
     else:

@@ -172,17 +172,17 @@ class MaxEngine(engine_api.Engine):
     )
     selected_logits = jax.lax.with_sharding_constraint(selected_logits, self.replicated_sharding)
 
-    # No need to return generate cache: "cached_ar_key" and "cached_ar_value"
-    # Delete the "cached_ar_key" and "cached_ar_value" keys would cause error in insert() function
-    # Set cached_ar_key/cached_ar_value to dummy shape (1,) value to save memory
-    for i in range(self.config.num_decoder_layers):
-      if f"layers_{i}" in new_vars["cache"]["decoder"]:
-        new_vars["cache"]["decoder"][f"layers_{i}"]["self_attention"]["AttentionOp_0"]["cached_ar_key"] = jnp.zeros(
-            (1), dtype=jnp.int32
-        )
-        new_vars["cache"]["decoder"][f"layers_{i}"]["self_attention"]["AttentionOp_0"]["cached_ar_value"] = jnp.zeros(
-            (1), dtype=jnp.int32
-        )
+    # # No need to return generate cache: "cached_ar_key" and "cached_ar_value"
+    # # Delete the "cached_ar_key" and "cached_ar_value" keys would cause error in insert() function
+    # # Set cached_ar_key/cached_ar_value to dummy shape (1,) value to save memory
+    # for i in range(self.config.num_decoder_layers):
+    #   if f"layers_{i}" in new_vars["cache"]["decoder"]:
+    #     new_vars["cache"]["decoder"][f"layers_{i}"]["self_attention"]["AttentionOp_0"]["cached_ar_key"] = jnp.zeros(
+    #         (1), dtype=jnp.int32
+    #     )
+    #     new_vars["cache"]["decoder"][f"layers_{i}"]["self_attention"]["AttentionOp_0"]["cached_ar_value"] = jnp.zeros(
+    #         (1), dtype=jnp.int32
+    #     )
 
     return {
         "logits": selected_logits,
@@ -258,7 +258,7 @@ class MaxEngine(engine_api.Engine):
     """Insert into KV cache"""
     unboxed_prefix = max_utils.unbox_logicallypartioned(prefix)
 
-    def copy(path, partial_cache, full_cache, annotations):
+    def copy(path, full_cache, partial_cache, annotations):
       path_key = path[-1].key
       if path_key in ["cache_ar_index", "cached_ar_key", "cached_ar_value", "cached_ar_key_scale", "cached_ar_value_scale"]:
         return full_cache  # we don't even zero these out because we can mask them out.
@@ -293,7 +293,7 @@ class MaxEngine(engine_api.Engine):
         raise ValueError(f"We don't have a strategy for inserting {path_key}")
 
     inserted_cache = jax.tree_util.tree_map_with_path(
-        copy, unboxed_prefix["cache"], decode_state["cache"], self.kv_cache_annotations_named
+      copy, unboxed_prefix["cache"], decode_state["cache"], self.kv_cache_annotations_named
     )
     inserted_logits = jax.lax.dynamic_update_index_in_dim(decode_state["logits"], unboxed_prefix["logits"], slot, 0)
     inserted_next_pos = jax.lax.dynamic_update_index_in_dim(decode_state["next_pos"], unboxed_prefix["next_pos"], slot, 0)
@@ -335,7 +335,7 @@ class MaxEngine(engine_api.Engine):
           x,
           decoder_segment_ids=jnp.zeros(x.shape, dtype=jnp.int32) + common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR,
           enable_dropout=False,
-          model_mode=common_types.MODEL_MODE_PREFILL,
+          model_mode=common_types.MODEL_MODE_INIT,
           rngs={"params": self.rng},
           mutable=["cache"],
       )
