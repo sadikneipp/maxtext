@@ -293,7 +293,7 @@ class MaxEngine(engine_api.Engine):
         raise ValueError(f"We don't have a strategy for inserting {path_key}")
 
     inserted_cache = jax.tree_util.tree_map_with_path(
-      copy, unboxed_prefix["cache"], decode_state["cache"], self.kv_cache_annotations_named
+      copy, decode_state["cache"], unboxed_prefix["cache"], self.kv_cache_annotations_named
     )
     inserted_logits = jax.lax.dynamic_update_index_in_dim(decode_state["logits"], unboxed_prefix["logits"], slot, 0)
     inserted_next_pos = jax.lax.dynamic_update_index_in_dim(decode_state["next_pos"], unboxed_prefix["next_pos"], slot, 0)
