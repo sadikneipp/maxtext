@@ -65,6 +65,17 @@ dynamic_vector_slice_in_dim = jax.vmap(lax.dynamic_slice_in_dim, in_axes=(None, 
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
 # pytype: disable=attribute-error
 
+@jax.jit
+def move_kv_axis_for_ragged(kv):
+  """Move key/value length axis.
+
+  Args:
+    kv: in shape [s, n, b, d].
+
+  Returns:
+    reshaped kv as [b, n, s, d]
+  """
+  return jax.numpy.moveaxis(kv, (0, 1, 2, 3), (2, 1, 0, 3))
 
 def apply_mask_to_logits(logits: Array, mask: Array):
   """Applies a floating-point mask to a set of logits.
@@ -157,50 +168,12 @@ class AttentionOp(nn.Module):
       key: Array,
       value: Array,
       decoder_segment_ids: Array | None,
-      model_mode: str):
-
-    # model_mode: 'prefill' 
-      # query.shape:  (4, 1024, 16, 256)   (b, s, n, d)
-      # key.shape:    (4, 1024, 16, 256)   (b, s, n, d)
-      # value.shape:  (4, 1024, 16, 256)   (b, s, n, d)
-
-    # model_mode: 'autoregressive' 
-      # query.shape:  (4,    1, 16, 256)   (b, 1, n, d)
-      # key.shape:    (4, 1024, 16, 256)   (b, s, n, d)
-      # value.shape:  (4, 1024, 16, 256)   (b, s, n, d)
-
-    # Ragged MQA is expecting: 
-      # q_mha:        (4, 16, 256)   (b, n, d)
-      # k_mha:        (4, 1024, 256) (b, s, d)
-      # v_mha:        (4, 1024, 256) (b, s, d)
-      # Which then gets vmapped across k and v's [1] dimension which is num_heads
-        # jax.vmap(ragged_mqa, in_axes=[None, 1, 1, None])
-    
-    # vmapped ragged_mqa
-      # ragged kernel - q.shape: (4, 1, 128)
-      # ragged kernel - k.shape: (4, 1024, 128)
-      # ragged kernel - v.shape: (4, 1024, 128)
-      # ragged kernel - lengths.shape: (4,)
-    # vmapped ref_mqa
-      # ref - q.shape: (4, 1, 128)
-      # ref - k.shape: (4, 1024, 128)
-      # ref - v.shape: (4, 1024, 128)
-      # ref - lengths.shape: (4,)
-    # ragged_attention
-      # wrap ragged attention - q.shape: (4, 8, 1, 128)
-      # wrap ragged attention - k.shape: (4, 8, 1024, 128)
-      # wrap ragged attention - v.shape: (4, 8, 1024, 128)
-      # wrap ragged attention - l.shape: (4,)
-      # ragged kernel - q.shape: (4, 1, 128)
-      # ragged kernel - k.shape: (4, 1024, 128)
-      # ragged kernel - v.shape: (4, 1024, 128)
-      # ragged kernel - lengths.shape: (4,)
-      # x:  (4, 4, 8, 128)
-      # xT:  (4, 4, 8, 128)
+      model_mode: str,
+      use_ragged: bool = False):
 
     self.check_attention_inputs(query, key, value)
     length = query.shape[-3]
-    if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE and decoder_segment_ids is not None:
+    if use_ragged and model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE and decoder_segment_ids is not None:
       return self.ragged_attention(query, key, value, decoder_segment_ids)
     elif self.attention_kernel == 'dot_product' or\
           (self.attention_kernel == 'autoselected' and model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE) or\
@@ -223,55 +196,47 @@ class AttentionOp(nn.Module):
     else:
       raise ValueError(f"Unexpected attention kernel {self.attention_kernel=}.")
   
-     
+  
   def ragged_attention(self, query: Array, key: Array, value: Array, decoder_segment_ids: Array) -> tuple[Array, Array, Array]:
     """Ragged Attention."""
-    @jax.jit
-    def swap_axes(q, k, v):
-      q = jnp.swapaxes(q, 1, 2)
-      k = jnp.swapaxes(k, 1, 2)
-      v = jnp.swapaxes(v, 1, 2)
-      return q, k, v
-
-    decoder_segment_ids = decoder_segment_ids.sum(axis=1)
-    print("ragged_attention - q.shape:", query.shape)
-    print("ragged_attention - k.shape:", key.shape)
-    print("ragged_attention - v.shape:", value.shape)
-    print("ragged_attention - l.shape:", decoder_segment_ids.shape)
-    query, key, value = swap_axes(query, key, value)
 
     @functools.partial(
         shard_map,
         mesh=self.mesh,
         in_specs=(
-            P(None, 'tensor', None, None),
-            P(None, 'tensor', None, None),
-            P(None, 'tensor', None, None),
+            P(None, None, None, None),
+            P(None, None, None, None),
+            P(None, None, None, None),
             P(None),
         ),
-        out_specs=P(None, 'tensor', None, None),
+        out_specs=P(None, None, None, None),
         check_rep=False,
     )
     def wrap_ragged_attention(query, key, value, decoder_segment_ids):
+      lengths = decoder_segment_ids.sum(axis=1)
       print("wrap ragged attention - q.shape:", query.shape) 
       print("wrap ragged attention - k.shape:", key.shape) 
       print("wrap ragged attention - v.shape:", value.shape) 
-      print("wrap ragged attention - l.shape:", decoder_segment_ids.shape) 
+      print("wrap ragged attention - l.shape:", lengths.shape) 
+      print("wrap ragged attention - l:", lengths) 
+      # wrap ragged attention - q.shape: (16, 32,    1, 128)     
+      # wrap ragged attention - k.shape: (16, 32, 1024, 128)
+      # wrap ragged attention - v.shape: (16, 32, 1024, 128)
+      # wrap ragged attention - l.shape: (16,)
+
       vmap_ragged_mqa = jax.vmap(ragged_mqa, in_axes=[1, 1, 1, None], out_axes=1)
-      o, m, l = vmap_ragged_mqa(query, key, value, decoder_segment_ids)
-      print("wrap ragged attention - o.shape:", o.shape) 
-      print("wrap ragged attention - m.shape:", m.shape) 
-      print("wrap ragged attention - l.shape:", l.shape) 
-      return o, m, l 
+      # o,m,l  = vmap_ragged_mqa(jnp.swapaxes(query, 1, 2), jnp.swapaxes(key, 1, 2), jnp.swapaxes(value, 1, 2), lengths)
+      o,m,l  = vmap_ragged_mqa(query, key, value, lengths)
+      print(f"ragged_attention result - {o.shape=}")
+      print(f"ragged_attention result - {m.shape=}")
+      print(f"ragged_attention result - {l.shape=}")
+      # ragged_attention result - o.shape=(16, 32, 1, 128)
+      # ragged_attention result - m.shape=(16, 32, 1)
+      # ragged_attention result - l.shape=(16, 32, 1)
+      return jnp.swapaxes(o, 1, 2), jnp.swapaxes(m, 1, 2), jnp.swapaxes(l, 1, 2)
+      # return o, m, l
 
-    devices_in_data_fsdp = self.mesh.shape["data"] * self.mesh.shape["fsdp"]
-    assert (query.shape[0] / devices_in_data_fsdp).is_integer(), (
-        "Batch dimension should be shardable among the devices in data and fsdp" " axis"
-    )
-
-    o,m,l = wrap_ragged_attention(query, key, value, decoder_segment_ids)
-    print(f"ragged_attention result - {o.shape=}")
-    return swap_axes(o, m, l)
+    return wrap_ragged_attention(query, key, value, decoder_segment_ids)
     
   
   def tpu_flash_attention(self, query: Array, key: Array, value: Array, decoder_segment_ids: Array | None) -> Array:
@@ -465,6 +430,7 @@ class AttentionOp(nn.Module):
     """
     return jax.numpy.moveaxis(kv, (0, 1, 2, 3), (1, 2, 0, 3))
 
+
   def move_kvlen_axis(self, kv):
     """Move key/value length axis to the end.
 
@@ -549,13 +515,14 @@ class AttentionOp(nn.Module):
   def _get_ar_cache(self, batch, heads, kv_head_size, quantize_kvcache):
     dtype = jnp.int8 if quantize_kvcache else jnp.bfloat16
     cache_length = self.max_target_length - self.max_prefill_predict_length
-    kv_cache_layout = (
+    kv_cache_layout = (   # (s,n,b,d)
         "cache_sequence",
         "cache_heads",
         "cache_batch",
         "cache_kv",
     )
     cache_logical_shape = (batch, cache_length, heads, kv_head_size)
+    # cache_logical_shape = (batch, heads, cache_length, kv_head_size)
     cached_key = self.variable(
         "cache",
         "cached_ar_key",
@@ -563,6 +530,8 @@ class AttentionOp(nn.Module):
         self.cached_kv_shape(cache_logical_shape),
         dtype,
     )
+    print("In _get_ar_cache.")
+    print(f"_get_ar_cache - {cached_key.value.shape=}")
     cached_value = self.variable(
         "cache",
         "cached_ar_value",
@@ -570,6 +539,7 @@ class AttentionOp(nn.Module):
         self.cached_kv_shape(cache_logical_shape),
         dtype,
     )
+    print(f"_get_ar_cache - {cached_value.value.shape=}")
     cached_segment_id = self.variable(
         "cache",
         "cache_ar_segment_id",
@@ -577,6 +547,8 @@ class AttentionOp(nn.Module):
         (cache_logical_shape[0], cache_length),
         jnp.int32,
     )
+    # _get_ar_cache - cached_key.value.shape=(32, 1024, 16, 128)
+    # _get_ar_cache - cached_value.value.shape=(32, 1024, 16, 128)
 
     if self.quantize_kvcache:
       cache_logical_shape_scale = (batch, cache_length, heads, 1)
@@ -721,6 +693,30 @@ class AttentionOp(nn.Module):
       ar_value = quantizations.unquantize_kv(cached_value_var.value, cached_value_scale_var.value, one_token_value.dtype)
 
     # Move the keys and values back to their original shapes.
+    # before swap: ar_key.shape=(1024, 32, 16, 128)
+    # before swap: ar_value.shape=(1024, 32, 16, 128)
+    # after swap: ar_key.shape=(1024, 32, 128, 16)
+    # after swap: ar_value.shape=(1024, 32, 128, 16)
+    # ar_key = nn.with_logical_constraint(
+    #     ar_key,
+    #     (
+    #         "cache_batch",
+    #         "cache_heads",
+    #         "cache_sequence",
+    #         "cache_kv",
+    #     ),
+    # )
+    # ar_value = nn.with_logical_constraint(
+    #     ar_value,
+    #     (
+    #         "cache_batch",
+    #         "cache_heads",
+    #         "cache_sequence",
+    #         "cache_kv",
+    #     ),
+    # )
+    # return ar_key, ar_value
+    # return move_kv_axis_for_ragged(ar_key), move_kv_axis_for_ragged(ar_value)
     return self.revert_kvlen_axis(ar_key), self.revert_kvlen_axis(ar_value)
 
   def prefill_cache_var_model_var(self, cache_var, target_dtype):
@@ -749,6 +745,12 @@ class AttentionOp(nn.Module):
     Raises:
       ValueError: when key/value shape is not [batch, 1, num_heads, heads_dim].
     """
+    print("\n\nInside kv_cache_ar.")
+    print(f"kv_cache_ar - {key.shape=}")
+    print(f"kv_cache_ar - {value.shape=}")
+    # key.shape=(16, 1, 32, 128)    - (b,1,n,d)
+    # value.shape=(16, 1, 32, 128)  - (b,1,n,d)
+
     batch, sequence, heads, kv_head_size = key.shape
     if sequence != 1:
       raise ValueError(f"Sequence length should be 1 during autoregression, got {sequence=}")
@@ -759,11 +761,26 @@ class AttentionOp(nn.Module):
     cached_ar_key_var, cached_ar_value_var, cached_ar_segment_id, cache_ar_index = self._get_ar_cache(
         batch, heads, kv_head_size, self.quantize_kvcache
     )
+    print(f"kv_cache_ar - {cached_ar_key_var[0].value.shape=}")
+    print(f"kv_cache_ar - {cached_ar_value_var[0].value.shape=}")
+    print(f"kv_cache_ar - {cached_ar_segment_id.value.shape=}")
+    print(f"kv_cache_ar - {cache_ar_index.value.shape=}")
+    # cached_ar_key_var[0].value.shape=(1024, 32, 16, 128) - (s,n,b,d)
+    # cached_ar_value_var[1].value.shape=(1024, 32, 16, 1)  - (s,n,b,1)
+    # cached_ar_segment_id.value.shape=(16, 1024)           - (b,s)
+    # cache_ar_index.value.shape=(1,)
 
     key = nn.with_logical_constraint(key, (BATCH, LENGTH, HEAD, D_KV))
     value = nn.with_logical_constraint(value, (BATCH, LENGTH, HEAD, D_KV))
+    # key = nn.with_logical_constraint(key, (BATCH, HEAD, LENGTH, D_KV))
+    # value = nn.with_logical_constraint(value, (BATCH, HEAD, LENGTH, D_KV))
 
     ar_key, ar_value = self.update_ar_key_value(key, value, cached_ar_key_var, cached_ar_value_var, cache_ar_index.value)
+    print(f"kv_cache_ar - {ar_key.shape=}")
+    print(f"kv_cache_ar - {ar_value.shape=}")
+    # ar_key.shape=(16, 1024, 32, 128)    - (b,s,n,d)
+    # ar_value.shape=(16, 1024, 32, 128)  - (b,s,n,d)
+
     active_indicator = jnp.zeros((batch, 1), dtype=jnp.int32) + common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
     cached_ar_segment_id.value = jax.lax.dynamic_update_index_in_dim(
         cached_ar_segment_id.value, active_indicator, jnp.squeeze(cache_ar_index.value), 1
@@ -774,13 +791,37 @@ class AttentionOp(nn.Module):
     cached_prefill_key_var, cached_prefill_value_var, cached_prefill_segment_id = self._get_prefill_cache(
         self.max_target_length, heads, kv_head_size, self.quantize_kvcache
     )
+    print(f"kv_cache_ar - {cached_prefill_key_var[0].value.shape=}")
+    print(f"kv_cache_ar - {cached_prefill_value_var[0].value.shape=}")
+    print(f"kv_cache_ar - {cached_prefill_segment_id.value.shape=}")
+    # cached_prefill_key_var[0].value.shape=(1024, 32, 16, 128)   - (s,n,b,d)
+    # cached_prefill_value_var[0].value.shape=(1024, 32, 16, 128) - (s,n,b,d)
+    # cached_prefill_segment_id.value.shape=(16, 1024)            - (b,s)
 
     cached_prefill = (
         self.prefill_cache_var_model_var(cached_prefill_key_var, key.dtype),
         self.prefill_cache_var_model_var(cached_prefill_value_var, value.dtype),
         cached_prefill_segment_id.value,
     )
-    return cached_prefill, (ar_key, ar_value, cached_ar_segment_id.value)
+    print(f"kv_cache_ar - {cached_prefill[0].shape=}")
+    print(f"kv_cache_ar - {cached_prefill[1].shape=}")
+    print(f"kv_cache_ar - {cached_prefill[2].shape=}")
+    # cached_prefill[0].shape=(16, 1024, 32, 128)
+    # cached_prefill[1].shape=(16, 1024, 32, 128)
+    # cached_prefill[2].shape=(16, 1024)
+
+    cached_ar = (
+      ar_key, 
+      ar_value, 
+      cached_ar_segment_id.value,
+    )
+    print(f"kv_cache_ar - {cached_ar[0].shape=}")
+    print(f"kv_cache_ar - {cached_ar[1].shape=}")
+    print(f"kv_cache_ar - {cached_ar[2].shape=}\n\n")
+    # cached_ar[0].shape=(16, 1024, 32, 128)
+    # cached_ar[1].shape=(16, 1024, 32, 128)
+    # cached_ar[2].shape=(16, 1024)
+    return cached_prefill, cached_ar
 
   def kv_cache(self, key: Array, value: Array, decoder_segment_ids: Array, model_mode: str) -> tuple:
     """KV cache takes the current state and updates the state accordingly.
@@ -906,6 +947,7 @@ class AttentionOp(nn.Module):
         value=prefill_kv_cache[1],
         decoder_segment_ids=prefill_kv_cache[2],
         model_mode=model_mode,
+        use_ragged=False,
     )
 
     # prefill_unnormalized_output.shape=(16, 1, 32, 128)
@@ -936,12 +978,14 @@ class AttentionOp(nn.Module):
       print("\t\tar_kv_cache is None, returning unnormalized outputs(?)")
       return prefill_unnormalized_output
 
+    # ar_kv_cache[0].shape=(1024, 32, 128, 16), ar_kv_cache[1].shape=(1024, 32, 128, 16)
     ar_unnormalized_output, ar_exponentials_max, ar_exponentials_sum = self.apply_attention(
         query=query,
         key=ar_kv_cache[0],
         value=ar_kv_cache[1],
         decoder_segment_ids=ar_kv_cache[2],
         model_mode=model_mode,
+        use_ragged=True,
     )
     print("\toutput of ar apply_attention call:")
     # ar_unnormalized_output.shape=(16, 1, 32, 128)
@@ -965,8 +1009,8 @@ class AttentionOp(nn.Module):
       
 
     if ar_unnormalized_output is not None:
-      prefill_exponentials_max = jnp.expand_dims(prefill_exponentials_max, axis=-1)
-      prefill_exponentials_sum = jnp.expand_dims(prefill_exponentials_sum, axis=-1)
+      # prefill_exponentials_max = jnp.expand_dims(prefill_exponentials_max, axis=-1)
+      # prefill_exponentials_sum = jnp.expand_dims(prefill_exponentials_sum, axis=-1)
       ar_exponentials_max = jnp.expand_dims(ar_exponentials_max, axis=-1)
       ar_exponentials_sum = jnp.expand_dims(ar_exponentials_sum, axis=-1)
       unnormalized_outputs = [prefill_unnormalized_output, ar_unnormalized_output]
