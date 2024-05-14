@@ -173,7 +173,7 @@ class AttentionOp(nn.Module):
 
     self.check_attention_inputs(query, key, value)
     length = query.shape[-3]
-    if use_ragged and model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE and decoder_segment_ids is not None:
+    if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE and decoder_segment_ids is not None:
       return self.ragged_attention(query, key, value, decoder_segment_ids)
     elif self.attention_kernel == 'dot_product' or\
           (self.attention_kernel == 'autoselected' and model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE) or\
@@ -233,9 +233,13 @@ class AttentionOp(nn.Module):
       # ragged_attention result - o.shape=(16, 32, 1, 128)
       # ragged_attention result - m.shape=(16, 32, 1)
       # ragged_attention result - l.shape=(16, 32, 1)
-      return jnp.swapaxes(o, 1, 2), jnp.swapaxes(m, 1, 2), jnp.swapaxes(l, 1, 2)
-      # return o, m, l
+      # return jnp.swapaxes(o, 1, 2), jnp.swapaxes(m, 1, 2), jnp.swapaxes(l, 1, 2)
+      print(f"wrap_ragged_attention r- {o.shape}")
+      print(f"wrap_ragged_attention - {m.shape}")
+      print(f"wrap_ragged_attention - {l.shape}")
+      return o, m, l
 
+    query = jnp.swapaxes(query, 1, 2)
     return wrap_ragged_attention(query, key, value, decoder_segment_ids)
     
   
@@ -397,6 +401,10 @@ class AttentionOp(nn.Module):
     Returns:
       results in shape [b, n_kv, n // n_kv,  t, s].
     """
+    # qk_product - query.shape=(16, 1, 32, 128)
+    # qk_product - key.shape=(16, 32, 1024, 128)
+    print(f"qk_product - {query.shape=}")
+    print(f"qk_product - {key.shape=}")
     b, t, n, d = query.shape
     n_kv = key.shape[-2]
     assert n_kv == self.num_kv_heads
@@ -428,7 +436,8 @@ class AttentionOp(nn.Module):
     Returns:
       reshaped kv as [b, ..., s, n, d]
     """
-    return jax.numpy.moveaxis(kv, (0, 1, 2, 3), (1, 2, 0, 3))
+    # return jax.numpy.moveaxis(kv, (0, 1, 2, 3), (1, 2, 0, 3))
+    return jax.numpy.moveaxis(kv, (0, 1, 2, 3), (2, 1, 0, 3))
 
 
   def move_kvlen_axis(self, kv):
@@ -692,32 +701,13 @@ class AttentionOp(nn.Module):
       ar_key = quantizations.unquantize_kv(cached_key_var.value, cached_key_scale_var.value, one_token_key.dtype)
       ar_value = quantizations.unquantize_kv(cached_value_var.value, cached_value_scale_var.value, one_token_value.dtype)
 
-    # Move the keys and values back to their original shapes.
-    # before swap: ar_key.shape=(1024, 32, 16, 128)
-    # before swap: ar_value.shape=(1024, 32, 16, 128)
-    # after swap: ar_key.shape=(1024, 32, 128, 16)
-    # after swap: ar_value.shape=(1024, 32, 128, 16)
-    # ar_key = nn.with_logical_constraint(
-    #     ar_key,
-    #     (
-    #         "cache_batch",
-    #         "cache_heads",
-    #         "cache_sequence",
-    #         "cache_kv",
-    #     ),
-    # )
-    # ar_value = nn.with_logical_constraint(
-    #     ar_value,
-    #     (
-    #         "cache_batch",
-    #         "cache_heads",
-    #         "cache_sequence",
-    #         "cache_kv",
-    #     ),
-    # )
-    # return ar_key, ar_value
-    # return move_kv_axis_for_ragged(ar_key), move_kv_axis_for_ragged(ar_value)
-    return self.revert_kvlen_axis(ar_key), self.revert_kvlen_axis(ar_value)
+    print(f"update_ar_key_value - {ar_key.shape=}")
+    print(f"update_ar_key_value - {ar_value.shape=}")
+    ar_key = self.revert_kvlen_axis(ar_key)     # (1024, 32, 16, 128) -> (16, 1024, 32, 128)  | (s,n,b,d) -> (b,s,n,d) | (1, 2, 0, 3)
+    ar_value = self.revert_kvlen_axis(ar_value) # (1024, 32, 16, 128) -> (16, 1024, 32, 128)  | we want (2, 1, 0, 3)
+    print(f"update_ar_key_value reverted - {ar_key.shape=}")
+    print(f"update_ar_key_value reverted - {ar_value.shape=}")
+    return ar_key, ar_value
 
   def prefill_cache_var_model_var(self, cache_var, target_dtype):
     if not self.quantize_kvcache:
@@ -821,6 +811,14 @@ class AttentionOp(nn.Module):
     # cached_ar[0].shape=(16, 1024, 32, 128)
     # cached_ar[1].shape=(16, 1024, 32, 128)
     # cached_ar[2].shape=(16, 1024)
+
+    
+    # kv_cache_ar - cached_prefill[0].shape=(16, 1024, 32, 128)
+    # kv_cache_ar - cached_prefill[1].shape=(16, 1024, 32, 128)
+    # kv_cache_ar - cached_prefill[2].shape=(16, 1024)
+    # kv_cache_ar - cached_ar[0].shape=(16, 1024, 32, 128)
+    # kv_cache_ar - cached_ar[1].shape=(16, 1024, 32, 128)
+    # kv_cache_ar - cached_ar[2].shape=(16, 1024)
     return cached_prefill, cached_ar
 
   def kv_cache(self, key: Array, value: Array, decoder_segment_ids: Array, model_mode: str) -> tuple:
@@ -898,14 +896,8 @@ class AttentionOp(nn.Module):
     
     for local_max, local_out in zip(local_maxes, local_outs):
       local_normalizer = jnp.exp(local_max - global_max) / global_sum # (8,12,8) for all vars
-      # print(f"{local_normalizer.shape=}") # local_normalizer.shape=(4, 32, 1)
-      # print(f"{local_out.shape=}")        # 
       result = local_normalizer*local_out
-      # print(f"{result.shape=}")
-      # local_normalizer.shape=(4, 32, 1)
       attn_out += local_normalizer * local_out    # (8,12,8) * (8,12,8,32)  Causes issue
-      # print(f"{attn_out.shape=}")
-    # jax.debug.print("attn_out: {}", attn_out.shape)
     return attn_out
 
   @nn.compact
@@ -1009,8 +1001,8 @@ class AttentionOp(nn.Module):
       
 
     if ar_unnormalized_output is not None:
-      # prefill_exponentials_max = jnp.expand_dims(prefill_exponentials_max, axis=-1)
-      # prefill_exponentials_sum = jnp.expand_dims(prefill_exponentials_sum, axis=-1)
+      prefill_exponentials_max = jnp.expand_dims(prefill_exponentials_max, axis=-1)
+      prefill_exponentials_sum = jnp.expand_dims(prefill_exponentials_sum, axis=-1)
       ar_exponentials_max = jnp.expand_dims(ar_exponentials_max, axis=-1)
       ar_exponentials_sum = jnp.expand_dims(ar_exponentials_sum, axis=-1)
       unnormalized_outputs = [prefill_unnormalized_output, ar_unnormalized_output]
@@ -1138,6 +1130,8 @@ class Attention(nn.Module):
     return query, key, value
 
   def out_projection(self, output_dim: int, out: Array) -> Array:
+    print(f"out_projection - {output_dim=}")
+    print(f"out_projection - {out.shape=}")
     out_proj = DenseGeneral(
         features=output_dim,
         axis=(-2, -1),
@@ -1228,6 +1222,12 @@ class Attention(nn.Module):
     out = nn.with_logical_constraint(out, self.out_axis_names)
 
     # apply output projection,  output dim is set to the input dim.
+    print("About to call self.out_projection.")
+    print(f"{inputs_q.shape[-1]=}")
+    print(f"{out.shape=}")
+    # inputs_q.shape[-1]=4096
+    # out.shape=(16, 32, 1, 128)
+    # flax.errors.ScopeParamShapeError: Initializer expected to generate shape (32, 128, 4096) but got shape (1, 128, 4096) 
     out = self.out_projection(inputs_q.shape[-1], out)
     out = checkpoint_name(out, "out_proj")
     return out
