@@ -469,9 +469,9 @@ class AttentionOp(nn.Module):
     dtype = jnp.int8 if quantize_kvcache else jnp.bfloat16
 
     kv_cache_layout = (
+        "cache_batch",
         "cache_sequence",
         "cache_heads",
-        "cache_batch",
         "cache_kv",
     )
     cache_logical_shape = (batch, self.max_prefill_predict_length, heads, kv_head_size)
@@ -1130,11 +1130,24 @@ class Attention(nn.Module):
     return query, key, value
 
   def out_projection(self, output_dim: int, out: Array) -> Array:
+    # prefill calls: 
+      # out_projection - output_dim=4096
+      # out_projection - out.shape=(16, 1024, 32, 128)
+    # ar calls:
+      # out_projection - output_dim=4096
+      # out_projection - out.shape=(16, 32, 1, 128)
+      # Initializer expected to generate shape (32, 128, 4096) but got shape (1, 128, 4096) 
+      #   instead for parameter "kernel" in "/decoder/remat(layers_0)/self_attention/out". 
+      #   (https://flax.readthedocs.io/en/latest/api_reference/flax.errors.html#flax.errors.ScopeParamShapeError)
     print(f"out_projection - {output_dim=}")
     print(f"out_projection - {out.shape=}")
+    if out.shape[2] == 1:
+      axis = (-3, -1)
+    else:
+      axis = (-2, -1)
     out_proj = DenseGeneral(
         features=output_dim,
-        axis=(-2, -1),
+        axis=axis,
         kernel_init=self.kernel_init,
         kernel_axes=("heads", "kv", "embed"),
         dtype=self.dtype,
