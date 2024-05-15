@@ -463,18 +463,25 @@ class AttentionOp(nn.Module):
     Returns:
       Swapped kv_shape as [b, ..., n, d, s] for cache.
     """
-    return (kv_shape[1], kv_shape[2], kv_shape[0], kv_shape[3])
+    # cached_kv_shape() - kv_shape=(2048, 32, 1024, 128)
+    # cached_kv_shape() - new_layout=(32, 1024, 2048, 128)
+    print(f"cached_kv_shape() - {kv_shape=}")
+    new_layout = (kv_shape[1], kv_shape[2], kv_shape[0], kv_shape[3])
+    print(f"cached_kv_shape() - {new_layout=}")
+    return new_layout
 
   def _get_prefill_cache(self, batch, heads, kv_head_size, quantize_kvcache):
     dtype = jnp.int8 if quantize_kvcache else jnp.bfloat16
 
+    # change here does nothing by itself
     kv_cache_layout = (
         "cache_batch",
-        "cache_sequence",
         "cache_heads",
+        "cache_sequence",
         "cache_kv",
     )
-    cache_logical_shape = (batch, self.max_prefill_predict_length, heads, kv_head_size)
+    # cache_logical_shape = (batch, self.max_prefill_predict_length, heads, kv_head_size)
+    cache_logical_shape = (batch, heads, self.max_prefill_predict_length, kv_head_size)
     cached_key = self.variable(
         "cache",
         "cached_prefill_key",
@@ -482,6 +489,9 @@ class AttentionOp(nn.Module):
         self.cached_kv_shape(cache_logical_shape),
         dtype,
     )
+    print(f"_get_prefill_cache - {cached_key.value.shape=}")
+    # _get_prefill_cache - cached_key.value.shape=(32, 1024, 16, 128)
+    # _get_prefill_cache - cached_key.value.shape=(1024, 32, 16, 128)
     cached_value = self.variable(
         "cache",
         "cached_prefill_value",
@@ -608,10 +618,18 @@ class AttentionOp(nn.Module):
     cached_prefill_key_var, cached_prefill_value_var, cached_prefill_segment_id = self._get_prefill_cache(
         batch, heads, kv_head_size, self.quantize_kvcache
     )
+    print(f"kv_cache_prefill() - {cached_prefill_key_var[0].value.shape=}")
+    print(f"kv_cache_prefill() - {cached_prefill_value_var[0].value.shape=}")
+    # kv_cache_prefill() - cached_prefill_key_var[0].value.shape=(32, 1024, 16, 128)
+    # kv_cache_prefill() - cached_prefill_value_var[0].value.shape=(32, 1024, 16, 128)
     self._get_ar_cache(batch, heads, kv_head_size, self.quantize_kvcache)  # initialize it now
 
     key_shaped_for_cache = self.move_kvlen_axis(key)
     value_shaped_for_cache = self.move_kvlen_axis(value)
+    print(f"kv_cache_prefill() - {key_shaped_for_cache.shape=}")
+    print(f"kv_cache_prefill() - {value_shaped_for_cache.shape=}")
+    # kv_cache_prefill() - key_shaped_for_cache.shape=(1024, 32, 16, 128)
+    # kv_cache_prefill() - value_shaped_for_cache.shape=(1024, 32, 16, 128)
 
     if self.quantize_kvcache:
       key_shaped_for_cache, key_scale = quantizations.quantize_kv(key_shaped_for_cache)
@@ -756,7 +774,7 @@ class AttentionOp(nn.Module):
     print(f"kv_cache_ar - {cached_ar_segment_id.value.shape=}")
     print(f"kv_cache_ar - {cache_ar_index.value.shape=}")
     # cached_ar_key_var[0].value.shape=(1024, 32, 16, 128) - (s,n,b,d)
-    # cached_ar_value_var[1].value.shape=(1024, 32, 16, 1)  - (s,n,b,1)
+    # cached_ar_value_var[0].value.shape=(1024, 32, 16, 1)  - (s,n,b,1)
     # cached_ar_segment_id.value.shape=(16, 1024)           - (b,s)
     # cache_ar_index.value.shape=(1,)
 
@@ -788,6 +806,7 @@ class AttentionOp(nn.Module):
     # cached_prefill_value_var[0].value.shape=(1024, 32, 16, 128) - (s,n,b,d)
     # cached_prefill_segment_id.value.shape=(16, 1024)            - (b,s)
 
+    # Pate: this is where it changes
     cached_prefill = (
         self.prefill_cache_var_model_var(cached_prefill_key_var, key.dtype),
         self.prefill_cache_var_model_var(cached_prefill_value_var, value.dtype),
@@ -930,7 +949,7 @@ class AttentionOp(nn.Module):
     if ar_kv_cache is not None:
       print(f"\t{ar_kv_cache[0].shape=}, {ar_kv_cache[1].shape=}")
     else:
-      print("\tar_kv_cache = None")
+      print("\tar_kv_cache = None"a
 
     # What does this do during AR phase? 
     prefill_unnormalized_output, prefill_exponentials_max, prefill_exponentials_sum = self.apply_attention(
