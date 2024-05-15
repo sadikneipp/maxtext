@@ -949,7 +949,7 @@ class AttentionOp(nn.Module):
     if ar_kv_cache is not None:
       print(f"\t{ar_kv_cache[0].shape=}, {ar_kv_cache[1].shape=}")
     else:
-      print("\tar_kv_cache = None"a
+      print("\tar_kv_cache = None")
 
     # What does this do during AR phase? 
     prefill_unnormalized_output, prefill_exponentials_max, prefill_exponentials_sum = self.apply_attention(
