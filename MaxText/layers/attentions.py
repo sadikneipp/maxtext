@@ -156,6 +156,11 @@ class AttentionOp(nn.Module):
 
   def apply_attention(self, query: Array, key: Array, value: Array, decoder_segment_ids: Array | None, model_mode: str):
     self.check_attention_inputs(query, key, value)
+    print()
+    print(f"apply_attention - {query.shape=}")
+    print(f"apply_attention - {key.shape=}")
+    print(f"apply_attention - {value.shape=}")
+    print(f"apply_attention - {model_mode=}")
     length = query.shape[-3]
     if (
         self.attention_kernel == "dot_product"
@@ -368,6 +373,9 @@ class AttentionOp(nn.Module):
     Returns:
       reshaped kv as [b, ..., s, n, d]
     """
+    print()
+    print(f"revert_kvlen_axis - {kv.shape=}")
+    print(f"revert_kvlen_axis - {cached_axis_order=}")
     return jax.numpy.moveaxis(kv, (0, 1, 2, 3), cached_axis_order)
 
   def move_kvlen_axis(self, kv, cached_axis_order):
@@ -379,12 +387,19 @@ class AttentionOp(nn.Module):
     Returns:
       reshaped kv as [b, ..., n, d, s]
     """
+    print()
+    print(f"move_kvlen_axis - {kv.shape=}")
+    print(f"move_kvlen_axis - {cached_axis_order=}")
     axis_order_to_index_mapping = {a:i for i, a in enumerate(cached_axis_order)}
     axis_destination = tuple([i for a, i in sorted(axis_order_to_index_mapping.items())])
     return jax.numpy.moveaxis(kv, (0, 1, 2, 3), axis_destination)
 
   def cached_kv_layout(self, kv_layout, cached_axis_order):
-    return tuple([kv_layout[i] for i in cached_axis_order])
+    print(f"cached_kv_layout - {kv_layout=}")
+    print(f"cached_kv_layout - {cached_axis_order=}")
+    cached_kv_layout = tuple([kv_layout[i] for i in cached_axis_order])
+    print(f"cached_kv_layout - {cached_kv_layout=}")
+    return cached_kv_layout
 
   def cached_kv_shape(self, kv_shape, cached_axis_order):
     """Cached KV shape.
@@ -398,7 +413,14 @@ class AttentionOp(nn.Module):
     Returns:
       Swapped kv_shape as [b, ..., n, d, s] for cache.
     """
-    return tuple([kv_shape[i] for i in cached_axis_order])
+    # cached_kv_shape - kv_shape=(2048, 32, 1024, 128)
+    # cached_kv_shape - cached_axis_order=(1, 2, 0, 3)
+    # cached_kv_shape - cached_kv_shape=(32, 1024, 2048, 128)
+    print(f"cached_kv_shape - {kv_shape=}")
+    cached_kv_shape = tuple([kv_shape[i] for i in cached_axis_order])
+    print(f"cached_kv_shape - {cached_axis_order=}")
+    print(f"cached_kv_shape - {cached_kv_shape=}")
+    return cached_kv_shape
 
   def _get_prefill_cache(self, batch, heads, kv_head_size, quantize_kvcache):
     dtype = jnp.int8 if quantize_kvcache else jnp.bfloat16
@@ -408,6 +430,8 @@ class AttentionOp(nn.Module):
 
     key_layout = self.cached_kv_layout(cache_logical_layout, self.prefill_key_axis_order)
     value_layout = self.cached_kv_layout(cache_logical_layout, self.prefill_value_axis_order)
+    print(f"_get_prefill_cache - {key_layout=}")
+    print(f"_get_prefill_cache - {value_layout=}")
 
     cached_key = self.variable(
         "cache",
@@ -416,6 +440,18 @@ class AttentionOp(nn.Module):
         self.cached_kv_shape(cache_logical_shape, self.prefill_key_axis_order),
         dtype,
     )
+    # cached_key = self.variable(
+    #     "cache",
+    #     "cached_ar_key",
+    #     nn.with_logical_partitioning(jnp.zeros, key_layout),
+    #     self.cached_kv_shape(cache_logical_shape, self.ar_key_axis_order),
+    #     dtype,
+    # )
+    # cached_key.value = nn.with_logical_constraint(
+    #     cached_key.value,
+    #     key_layout,
+    # )
+    print(f"_get_prefill_cache - {cached_key.value.shape=}")
     cached_value = self.variable(
         "cache",
         "cached_prefill_value",
@@ -423,6 +459,7 @@ class AttentionOp(nn.Module):
         self.cached_kv_shape(cache_logical_shape, self.prefill_value_axis_order),
         dtype,
     )
+    print(f"_get_prefill_cache - {cached_value.value.shape=}")
     cached_segment_id = self.variable(
         "cache",
         "cache_prefill_segment_id",
@@ -464,6 +501,10 @@ class AttentionOp(nn.Module):
 
     key_layout = self.cached_kv_layout(cache_logical_layout, self.ar_key_axis_order)
     value_layout = self.cached_kv_layout(cache_logical_layout, self.ar_value_axis_order)
+    print(f"_get_ar_cache - {key_layout=}")
+    print(f"_get_ar_cache - {value_layout=}")
+    # _get_ar_cache - key_layout=('cache_sequence', 'cache_heads', 'cache_batch', 'cache_kv')
+    # _get_ar_cache - value_layout=('cache_sequence', 'cache_heads', 'cache_batch', 'cache_kv')
 
     # TODO(b/339703100): investigate the issue why with_logical_partitioning doesn't enforce sharding
     cached_key = self.variable(
@@ -477,6 +518,8 @@ class AttentionOp(nn.Module):
         cached_key.value,
         key_layout,
     )
+    print(f"_get_ar_cache - {cached_key.value.shape=}")
+    # _get_ar_cache - cached_key.value.shape=(1024, 32, 16, 128)
 
     cached_value = self.variable(
         "cache",
@@ -489,6 +532,8 @@ class AttentionOp(nn.Module):
         cached_value.value,
         value_layout,
     )
+    print(f"_get_ar_cache - {cached_value.value.shape=}")
+    # _get_ar_cache - cached_value.value.shape=(1024, 32, 16, 128)
 
     cached_segment_id = self.variable(
         "cache",
@@ -762,6 +807,12 @@ class AttentionOp(nn.Module):
   @nn.compact
   def __call__(self, query, key, value, decoder_segment_ids, model_mode):
     prefill_kv_cache, ar_kv_cache = self.kv_cache(key, value, decoder_segment_ids, model_mode)
+
+    print(f"{prefill_kv_cache[0].shape=}")
+    print(f"{prefill_kv_cache[1].shape=}")
+    if ar_kv_cache is not None:
+      print(f"{ar_kv_cache[0].shape=}")
+      print(f"{ar_kv_cache[1].shape=}")
 
     prefill_unnormalized_output, prefill_exponentials_max, prefill_exponentials_sum = self.apply_attention(
         query=query,
