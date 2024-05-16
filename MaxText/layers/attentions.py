@@ -156,7 +156,7 @@ class AttentionOp(nn.Module):
 
     return jnp.where(output_mask, 0.0, DEFAULT_MASK_VALUE) if output_mask is not None else None
 
-  def apply_attention(self, query: Array, key: Array, value: Array, decoder_segment_ids: Array | None, model_mode: str):
+  def apply_attention(self, query: Array, key: Array, value: Array, decoder_segment_ids: Array | None, model_mode: str, use_ragged: str = False):
     self.check_attention_inputs(query, key, value)
     print()
     print(f"apply_attention - {query.shape=}")
@@ -164,7 +164,7 @@ class AttentionOp(nn.Module):
     print(f"apply_attention - {value.shape=}")
     print(f"apply_attention - {model_mode=}")
     length = query.shape[-3]
-    if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE and decoder_segment_ids is not None:
+    if use_ragged and model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE and decoder_segment_ids is not None:
       return self.ragged_attention(query, key, value, decoder_segment_ids)
     elif (
         self.attention_kernel == "dot_product"
@@ -868,6 +868,7 @@ class AttentionOp(nn.Module):
         value=prefill_kv_cache[1],
         decoder_segment_ids=prefill_kv_cache[2],
         model_mode=model_mode,
+        use_ragged=False,
     )
 
     # Return the "prefill" cache if it actually the combined prefill+ar kv cache
@@ -882,7 +883,20 @@ class AttentionOp(nn.Module):
         value=ar_kv_cache[1],
         decoder_segment_ids=ar_kv_cache[2],
         model_mode=model_mode,
+        use_ragged=True,
     )
+    if ar_unnormalized_output is not None:
+      # prefill_exponentials_max = jnp.expand_dims(prefill_exponentials_max, axis=-1)
+      # prefill_exponentials_sum = jnp.expand_dims(prefill_exponentials_sum, axis=-1)
+      ar_exponentials_max = jnp.expand_dims(ar_exponentials_max, axis=-1)
+      ar_exponentials_sum = jnp.expand_dims(ar_exponentials_sum, axis=-1)
+      unnormalized_outputs = [prefill_unnormalized_output, ar_unnormalized_output]
+      exponentials_maxes = [prefill_exponentials_max, ar_exponentials_max]
+      exponentials_sums = [prefill_exponentials_sum, ar_exponentials_sum]
+      return self.normalize_attention(unnormalized_outputs, exponentials_maxes, exponentials_sums)
+    else:
+      return prefill_unnormalized_output / prefill_exponentials_sum
+
 
     unnormalized_outputs = [prefill_unnormalized_output, ar_unnormalized_output]
     exponentials_maxes = [prefill_exponentials_max, ar_exponentials_max]
@@ -1070,6 +1084,9 @@ class Attention(nn.Module):
       value = self.kv_projection(inputs_kv, proj_name="value")
 
     # apply ROPE
+    print(f"query before RotaryEmbedding: {query.shape=}")
+    print(f"key before RotaryEmbedding: {key.shape=}")
+    print(f"value before RotaryEmbedding: {value.shape=}")
     query = RotaryEmbedding(embedding_dims=self.head_dim, name="query_rotary")(inputs=query, position=inputs_positions)
     key = self.key_rotary(key, inputs_positions)
 
