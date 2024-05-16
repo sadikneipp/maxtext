@@ -27,7 +27,9 @@ from jax.experimental import shard_map
 from jax.experimental.pallas.ops import attention as pallas_attention
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel
+from kernels.ragged_attention import mqa_reference, ragged_mqa
 import jax.numpy as jnp
+from jax.sharding import PartitionSpec as P
 
 import common_types
 from layers import embeddings
@@ -162,7 +164,9 @@ class AttentionOp(nn.Module):
     print(f"apply_attention - {value.shape=}")
     print(f"apply_attention - {model_mode=}")
     length = query.shape[-3]
-    if (
+    if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE and decoder_segment_ids is not None:
+      return self.ragged_attention(query, key, value, decoder_segment_ids)
+    elif (
         self.attention_kernel == "dot_product"
         or (self.attention_kernel == "autoselected" and model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE)
         or (self.attention_kernel == "autoselected" and length < 128)
@@ -184,6 +188,50 @@ class AttentionOp(nn.Module):
       return self.cudnn_flash_attention(query, key, value, decoder_segment_ids, model_mode), None, None
     else:
       raise ValueError(f"Unexpected attention kernel {self.attention_kernel=}.")
+  
+  def ragged_attention(self, query: Array, key: Array, value: Array, decoder_segment_ids: Array) -> tuple[Array, Array, Array]:
+    """Ragged Attention."""
+
+    @functools.partial(
+        shard_map,
+        mesh=self.mesh,
+        in_specs=(
+            P(None, None, None, None),
+            P(None, None, None, None),
+            P(None, None, None, None),
+            P(None),
+        ),
+        out_specs=P(None, None, None, None),
+        check_rep=False,
+    )
+    def wrap_ragged_attention(query, key, value, decoder_segment_ids):
+      lengths = decoder_segment_ids.sum(axis=1)
+      print("wrap ragged attention - q.shape:", query.shape) 
+      print("wrap ragged attention - k.shape:", key.shape) 
+      print("wrap ragged attention - v.shape:", value.shape) 
+      print("wrap ragged attention - l.shape:", lengths.shape) 
+      print("wrap ragged attention - l:", lengths) 
+      # wrap ragged attention - q.shape: (16, 32,    1, 128)     
+      # wrap ragged attention - k.shape: (16, 32, 1024, 128)
+      # wrap ragged attention - v.shape: (16, 32, 1024, 128)
+      # wrap ragged attention - l.shape: (16,)
+
+      vmap_ragged_mqa = jax.vmap(ragged_mqa, in_axes=[2, 2, 2, None], out_axes=2)
+      # o,m,l  = vmap_ragged_mqa(jnp.swapaxes(query, 1, 2), jnp.swapaxes(key, 1, 2), jnp.swapaxes(value, 1, 2), lengths)
+      o,m,l  = vmap_ragged_mqa(query, key, value, lengths)
+      print(f"ragged_attention result - {o.shape=}")
+      print(f"ragged_attention result - {m.shape=}")
+      print(f"ragged_attention result - {l.shape=}")
+      # ragged_attention result - o.shape=(16, 32, 1, 128)
+      # ragged_attention result - m.shape=(16, 32, 1)
+      # ragged_attention result - l.shape=(16, 32, 1)
+      # return jnp.swapaxes(o, 1, 2), jnp.swapaxes(m, 1, 2), jnp.swapaxes(l, 1, 2)
+      print(f"wrap_ragged_attention r- {o.shape}")
+      print(f"wrap_ragged_attention - {m.shape}")
+      print(f"wrap_ragged_attention - {l.shape}")
+      return o, m, l
+
+    return wrap_ragged_attention(query, key, value, decoder_segment_ids)
 
   def tpu_flash_attention(self, query: Array, key: Array, value: Array, decoder_segment_ids: Array | None) -> Array:
     """TPU Flash Attention."""
