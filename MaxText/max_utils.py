@@ -44,6 +44,7 @@ from tensorboardX import writer
 
 from google.cloud import storage
 
+from ctypes import cdll
 
 def find_nans_and_infs(pytree):
   def finder(x):
@@ -85,18 +86,6 @@ def summarize_size_from_pytree(params):
   num_params = calculate_num_params_from_pytree(params)
   num_bytes = calculate_bytes_from_pytree(params)
   return num_params, num_bytes, num_bytes / num_params
-
-
-def activate_profiler(config, optional_postfix=""):
-  if config.enable_profiler and (config.upload_all_profiler_results or jax.process_index() == 0):
-    output_path = os.path.join(config.tensorboard_dir, optional_postfix)
-    jax.profiler.start_trace(output_path)
-
-
-def deactivate_profiler(config):
-  if config.enable_profiler and (config.upload_all_profiler_results or jax.process_index() == 0):
-    jax.profiler.stop_trace()
-
 
 def initialize_summary_writer(config):
   return writer.SummaryWriter(config.tensorboard_dir) if jax.process_index() == 0 else None
@@ -680,3 +669,48 @@ def summarize_pytree_data(params, name="Params", raw=False):
             f"\tTotal memory usage: {total_param_size:.3f} bytes \n"
             f"\tAvg size: {avg_param_size:.3f} bytes\n")
   return num_params, total_param_size, avg_param_size
+
+
+class Profiler:
+  """Activate/deactivate a profiler based on the 'profiler' config"""
+
+  def __init__(self, config, optional_postfix=""):
+    self.libcudart = None
+    self.mode = config.profiler
+    if self.mode == "" and config.enable_profiler:
+      self.mode = "xprof"
+    self.upload_all_profiler_results = config.upload_all_profiler_results
+    self.output_path = os.path.join(config.tensorboard_dir, optional_postfix)
+
+  def activate(self):
+    """Start the profiler.
+    nsys profiler becomes no-op when libcudart.so is not available on the system"""
+    if not (self.upload_all_profiler_results or jax.process_index() == 0):
+      return
+    if self.mode == "nsys":
+      try:
+        self.libcudart = cdll.LoadLibrary('libcudart.so')
+      except Exception as e: # pylint: disable=broad-except
+        max_logging.log(f"WARNING: Failed to load library for nsys: {e}\n"
+                        "profiler has no effect")
+        return
+      self.libcudart.cudaProfilerStart()
+    elif self.mode == "xprof":
+      jax.profiler.start_trace(self.output_path)
+
+  def deactivate(self):
+    """End the profiler.
+    The result is uploaded to the output bucket"""
+    if not (self.upload_all_profiler_results or jax.process_index() == 0):
+      return
+    if self.mode == "nsys":
+      if self.libcudart is not None:
+        self.libcudart.cudaProfilerStop()
+      else:
+        max_logging.log("WARNING: library for nsys was not loaded \n"
+                        "profiler has no effect")
+        return
+      # Popen() instead of run() for non-blocking behavior
+      subprocess.Popen(["gsutil", "cp", "*nsys-rep", self.output_path]) # pylint: disable=consider-using-with
+    elif self.mode == "xprof":
+      jax.profiler.stop_trace()
