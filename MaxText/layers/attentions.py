@@ -165,6 +165,9 @@ class AttentionOp(nn.Module):
     print(f"apply_attention - {model_mode=}")
     length = query.shape[-3]
     if use_ragged and model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE and decoder_segment_ids is not None:
+      query = jnp.swapaxes(query, 1, 2)
+      key = jnp.swapaxes(key, 1, 2)
+      value = jnp.swapaxes(value, 1, 2)
       return self.ragged_attention(query, key, value, decoder_segment_ids)
     elif (
         self.attention_kernel == "dot_product"
@@ -216,7 +219,7 @@ class AttentionOp(nn.Module):
       # wrap ragged attention - v.shape: (16, 32, 1024, 128)
       # wrap ragged attention - l.shape: (16,)
 
-      vmap_ragged_mqa = jax.vmap(ragged_mqa, in_axes=[2, 2, 2, None], out_axes=2)
+      vmap_ragged_mqa = jax.vmap(ragged_mqa, in_axes=[1, 1, 1, None], out_axes=2)
       # o,m,l  = vmap_ragged_mqa(jnp.swapaxes(query, 1, 2), jnp.swapaxes(key, 1, 2), jnp.swapaxes(value, 1, 2), lengths)
       o,m,l  = vmap_ragged_mqa(query, key, value, lengths)
       print(f"ragged_attention result - {o.shape=}")
@@ -766,6 +769,7 @@ class AttentionOp(nn.Module):
     Raises:
       ValueError: when key/value shape is not [batch, 1, num_heads, heads_dim].
     """
+    print(f"kv_cache_autoregressive - {key.shape=}")
     batch, sequence, heads, kv_head_size = key.shape
     if sequence != 1:
       raise ValueError(f"Sequence length should be 1 during autoregression, got {sequence=}")
@@ -893,6 +897,12 @@ class AttentionOp(nn.Module):
       unnormalized_outputs = [prefill_unnormalized_output, ar_unnormalized_output]
       exponentials_maxes = [prefill_exponentials_max, ar_exponentials_max]
       exponentials_sums = [prefill_exponentials_sum, ar_exponentials_sum]
+      print(f"{prefill_unnormalized_output.shape=}")
+      print(f"{ar_unnormalized_output.shape=}")
+      print(f"{prefill_exponentials_max.shape=}")
+      print(f"{ar_exponentials_max.shape=}")
+      print(f"{prefill_exponentials_sum.shape=}")
+      print(f"{ar_exponentials_sum.shape=}")
       return self.normalize_attention(unnormalized_outputs, exponentials_maxes, exponentials_sums)
     else:
       return prefill_unnormalized_output / prefill_exponentials_sum
