@@ -202,9 +202,9 @@ def ragged_mqa(
       ),
       mosaic_params=dict(dimension_semantics=("parallel", "arbitrary")),
       out_shape=[
-          q.astype(jnp.float32),
+          q,
           jax.ShapeDtypeStruct((batch_size, num_heads, head_dim), jnp.float32),
           jax.ShapeDtypeStruct((batch_size, num_heads, head_dim), jnp.float32),
       ],
-  )(lengths, q.astype(jnp.float32), k.astype(jnp.float32), v.astype(jnp.float32))
-  return out.astype(jnp.float32), m[..., 0], l[..., 0]  # o=q (b,n,d)?, m=(b,n,d), l=(b,n,d)
+  )(lengths, q, k, v)
+  return out, m[..., 0], l[..., 0]  # o=q (b,n,d)?, m=(b,n,d), l=(b,n,d)

@@ -165,7 +165,7 @@ class AttentionOp(nn.Module):
     print(f"apply_attention - {model_mode=}")
     length = query.shape[-3]
     if use_ragged and model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE and decoder_segment_ids is not None:
-      query = jnp.swapaxes(query, 1, 2)
+      query = jnp.swapaxes(query, 1, 2) # bsnd -> bnsd
       key = jnp.swapaxes(key, 1, 2)
       value = jnp.swapaxes(value, 1, 2)
       return self.ragged_attention(query, key, value, decoder_segment_ids)
@@ -199,20 +199,20 @@ class AttentionOp(nn.Module):
         shard_map,
         mesh=self.mesh,
         in_specs=(
-            P(None, None, None, None),
-            P(None, None, None, None),
-            P(None, None, None, None),
+            P(None, 'tensor', None, None),
+            P(None, 'tensor', None, None),
+            P(None, 'tensor', None, None),
             P(None),
         ),
-        out_specs=P(None, None, None, None),
+        out_specs=P(None, None, 'tensor', None),
         check_rep=False,
     )
     def wrap_ragged_attention(query, key, value, decoder_segment_ids):
       lengths = decoder_segment_ids.sum(axis=1)
-      print("wrap ragged attention - q.shape:", query.shape) 
-      print("wrap ragged attention - k.shape:", key.shape) 
-      print("wrap ragged attention - v.shape:", value.shape) 
-      print("wrap ragged attention - l.shape:", lengths.shape) 
+      print(f"wrap ragged attention - {query.shape}") # bnsd
+      print(f"wrap ragged attention - {key.shape}") # bnsd
+      print(f"wrap ragged attention - {value.shape}") # bnsd
+      print(f"wrap ragged attention - {lengths.shape}") # bnsd
       print("wrap ragged attention - l:", lengths) 
       # wrap ragged attention - q.shape: (16, 32,    1, 128)     
       # wrap ragged attention - k.shape: (16, 32, 1024, 128)
@@ -222,16 +222,16 @@ class AttentionOp(nn.Module):
       vmap_ragged_mqa = jax.vmap(ragged_mqa, in_axes=[1, 1, 1, None], out_axes=2)
       # o,m,l  = vmap_ragged_mqa(jnp.swapaxes(query, 1, 2), jnp.swapaxes(key, 1, 2), jnp.swapaxes(value, 1, 2), lengths)
       o,m,l  = vmap_ragged_mqa(query, key, value, lengths)
-      print(f"ragged_attention result - {o.shape=}")
-      print(f"ragged_attention result - {m.shape=}")
-      print(f"ragged_attention result - {l.shape=}")
+      # print(f"ragged_attention result - {o.shape=}")
+      # print(f"ragged_attention result - {m.shape=}")
+      # print(f"ragged_attention result - {l.shape=}")
       # ragged_attention result - o.shape=(16, 32, 1, 128)
       # ragged_attention result - m.shape=(16, 32, 1)
       # ragged_attention result - l.shape=(16, 32, 1)
       # return jnp.swapaxes(o, 1, 2), jnp.swapaxes(m, 1, 2), jnp.swapaxes(l, 1, 2)
-      print(f"wrap_ragged_attention r- {o.shape}")
-      print(f"wrap_ragged_attention - {m.shape}")
-      print(f"wrap_ragged_attention - {l.shape}")
+      print(f"wrap_ragged_attention - {o.shape=}")
+      print(f"wrap_ragged_attention - {m.shape=}")
+      print(f"wrap_ragged_attention - {l.shape=}")
       return o, m, l
 
     return wrap_ragged_attention(query, key, value, decoder_segment_ids)
