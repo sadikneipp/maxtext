@@ -270,6 +270,156 @@ def main(config):
       )
 
   if "generate" in stages_to_benchmark:
+
+    import inference_utils
+    import common_types
+    from jax import numpy as jnp
+    from jax._src.layout import Layout, DeviceLocalLayout as DLL
+    from flax.linen import partitioning as nn_partitioning
+    from jetstream.engine import engine_api
+    import re
+
+    pattern = re.compile(r"\{(.*?):")
+
+    # Extract minor_to_major from str(layout) because layout doesn't have a
+    # minor_to_major property yet.
+    def extract_minor_to_major(l):
+      match = re.search(pattern, str(l))
+      if match:
+        return tuple(int(i) for i in match.groups()[0].split(','))
+      return l
+
+    def modify_pytree_layout(p):
+      def modify_leaf_layout(leaf):
+        if isinstance(leaf, Layout):
+          leaf.device_local_layout = DLL.AUTO
+      jax.tree_util.tree_map(modify_leaf_layout, p)
+
+    def modify_pytree_sharding(p):
+      def modify_leaf_layout(leaf):
+        if isinstance(leaf, Layout):
+          leaf.sharding = None
+      jax.tree_util.tree_map(modify_leaf_layout, p)
+
+    def generate(params, decode_state):
+      """Run one generate step"""
+      previous_logits = decode_state["logits"]
+
+      new_token = inference_utils.sampling(
+          previous_logits,
+          engine.rng,
+          engine.config.decode_sampling_strategy,
+          topk=engine.config.decode_sampling_top_k,
+          nucleus_topp=engine.config.decode_sampling_nucleus_p,
+          temperature=engine.config.decode_sampling_temperature,
+      )
+
+      with engine.mesh, nn_partitioning.axis_rules(engine.config.logical_axis_rules):
+        out_logits, new_vars = engine.model.apply(
+            params | {"cache": decode_state["cache"]},
+            new_token,
+            decode_state["next_pos"],
+            enable_dropout=False,
+            model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
+            rngs={"params": engine.rng},
+            mutable=["cache"],
+        )
+
+      all_valid = jnp.ones(new_token.shape, dtype=jnp.int8)
+
+      result = engine_api.ResultTokens(
+          data=jnp.concatenate((new_token, all_valid, decode_state["generated_tokens"]), axis=1),
+          # Tokens are shape [batch, speculations], so when we concatenate
+          # tokens, validity and length along their index 1 dimension then they
+          # occupy 0:speculations.
+          tokens_idx=(0, 1),
+          # Validity occupies the same amount of space, but next in line.
+          valid_idx=(1, 2),
+          # And lengths is rank 1.
+          length_idx=(2, 3),
+          samples_per_slot=1,
+      )
+
+      out_logits = jax.lax.with_sharding_constraint(out_logits, engine.replicated_sharding)
+      new_cache = jax.lax.with_sharding_constraint(new_vars["cache"], engine.kv_cache_shardings)
+
+      return {
+          "logits": out_logits,
+          "cache": new_cache,
+          "next_pos": decode_state["next_pos"] + 1,
+          "generated_tokens": decode_state["generated_tokens"] + 1,
+      }, result
+    
+    def get_generate_layouts(compiled_generate):
+      (params_layout, decode_state_layout), _ = compiled_generate.input_layouts()
+      (generated_decode_state_layout, result_layout) = compiled_generate.output_layouts()
+      return params_layout, decode_state_layout, generated_decode_state_layout, result_layout
+
+    def inspect_decode_state_layouts(decode_state_layout, prefix):
+      attention_op_0 = decode_state_layout["cache"]["decoder"]['layers_0']['self_attention']['AttentionOp_0']
+      cached_prefill_key_layout = attention_op_0['cached_prefill_key']
+      cached_prefill_value_layout = attention_op_0['cached_prefill_value']
+      cached_ar_key_layout = attention_op_0['cached_ar_key']
+      cached_ar_value_layout = attention_op_0['cached_ar_value']
+      print(f"{prefix} decode_state_layouts: ")
+      print(f"    cached_prefill_key_layout: {extract_minor_to_major(cached_prefill_key_layout)}")
+      print(f"    cached_prefill_value_layout: {extract_minor_to_major(cached_prefill_value_layout)}")
+      print(f"    cached_ar_key_layout: {extract_minor_to_major(cached_ar_key_layout)}")
+      print(f"    cached_ar_value_layout: {extract_minor_to_major(cached_ar_value_layout)}")
+
+    abstract_params = jax.tree_util.tree_map(lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding), params)
+    abstract_decode_state = jax.tree_util.tree_map(lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding), decode_state)
+
+    # Concrete
+    concrete_lowered_generate = jax.jit(generate).lower(params, decode_state)
+    concrete_compiled_generate = concrete_lowered_generate.compile()
+    (
+      concrete_params_layout,
+      concrete_decode_state_layout,
+      concrete_generated_decode_state_layout,
+      concrete_result_layout
+    ) = get_generate_layouts(concrete_compiled_generate)
+    inspect_decode_state_layouts(concrete_decode_state_layout, "concrete")
+
+    # Optimized with Sharding
+    modify_pytree_layout(concrete_params_layout)
+    modify_pytree_layout(concrete_decode_state_layout)
+    modify_pytree_layout(concrete_generated_decode_state_layout)
+    modify_pytree_layout(concrete_result_layout)
+    inspect_decode_state_layouts(concrete_decode_state_layout, "modified to default")
+    optimized_w_sharding_lowered_generate = jax.jit(
+      generate,
+      in_shardings=(concrete_params_layout, concrete_decode_state_layout),
+      out_shardings=(concrete_generated_decode_state_layout, concrete_result_layout)
+    ).lower(abstract_params, abstract_decode_state)
+    optimized_w_sharding_compiled_generate = optimized_w_sharding_lowered_generate.compile()
+    (
+      optimized_w_sharding_params_layout,
+      optimized_w_sharding_decode_state_layout,
+      optimized_w_sharding_generated_decode_state_layout,
+      optimized_w_sharding_result_layout
+    ) = get_generate_layouts(optimized_w_sharding_compiled_generate)
+    inspect_decode_state_layouts(optimized_w_sharding_decode_state_layout, "optimized with sharding")
+
+    # Optimized without Sharding
+    modify_pytree_sharding(concrete_params_layout)
+    modify_pytree_sharding(concrete_decode_state_layout)
+    modify_pytree_sharding(concrete_generated_decode_state_layout)
+    modify_pytree_sharding(concrete_result_layout)
+    optimized_wo_sharding_lowered_generate = jax.jit(
+      generate,
+      in_shardings=(concrete_params_layout, concrete_decode_state_layout),
+      out_shardings=(concrete_generated_decode_state_layout, concrete_result_layout)
+    ).lower(abstract_params, abstract_decode_state)
+    optimized_wo_sharding_compiled_generate = optimized_wo_sharding_lowered_generate.compile()
+    (
+      optimized_wo_sharding_params_layout,
+      optimized_wo_sharding_decode_state_layout,
+      optimized_wo_sharding_generated_decode_state_layout,
+      optimized_wo_sharding_result_layout
+    ) = get_generate_layouts(optimized_wo_sharding_compiled_generate)
+    inspect_decode_state_layouts(optimized_wo_sharding_decode_state_layout, "optimized without sharding")
+
     benchmark_results["AutoRegressive"], decode_state = ar_benchmark(
       config, engine, params, decode_state, engine.max_concurrent_decodes, cache_size, model_size, benchmark_loop_iters)
 
