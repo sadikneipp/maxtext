@@ -145,7 +145,7 @@ def ragged_mqa(
     v: jax.Array,
     lengths: jax.Array,
     *, 
-    bk: int = 128,
+    bk: int = 256,
     mask_value: float = DEFAULT_MASK_VALUE,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
   """Ragged multi query attention."""
