@@ -71,7 +71,7 @@ def mqa_reference(
   # Get unnormalized logits by subtracting the max and taking exp of result
   unnormalized = jnp.exp(logits - logits_max[..., None])        
 
-  # Sum across the last dimension to get the denominator(?)
+  # Sum across the last dimension of unnormalized logits to get the denominator(?)
   denominator = unnormalized.sum(axis=-1)                       
 
   # Does this renormalize the output? 
@@ -200,7 +200,7 @@ def ragged_mqa(
           ],
           grid=(batch_size, seq_len // bk),
       ),
-      mosaic_params=dict(dimension_semantics=("parallel", "arbitrary")),
+      compiler_params=dict(mosaic=dict(dimension_semantics=["parallel", "arbitrary"])),
       out_shape=[
           q,
           jax.ShapeDtypeStruct((batch_size, num_heads, head_dim), jnp.float32),
